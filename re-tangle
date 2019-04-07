@@ -1,0 +1,4542 @@
+#!/usr/bin/env bash
+
+### Copyright 2019 Jonathan Bakke. All rights reserved.
+
+#  Redistribution and use in source and binary forms, with or without
+#  modification, are permitted provided that the following conditions are
+#  met:
+#
+#  1. Redistributions of source code must retain the above copyright
+#     notice, this list of conditions, and the following disclaimer.
+#  2. Redistributions in binary form must reproduce the above copyright
+#     notice, this list of conditions, and the following disclaimer in the
+#     documentation and/or other materials provided with the distribution.
+
+#  THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
+#  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+#  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN
+#  NO EVENT SHALL THE COPYIGHT HOLDER OR ANY AUTHOR OF ANY DERIVATIVE WORK
+#  BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+#  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+#  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+#  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+#  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+#  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+#  THE POSSIBILITY OF SUCH DAMAGE.
+
+#  To be clear: this script truly is a work in progress. I've wiped my
+#  own notes folder several times during development. Think of this script
+#  as being like a young puppy: it will try to do everything it can to
+#  meet your expectations, but along the way it might also chew up your
+#  slippers and foul the rug. You have been warned.
+
+### Introduction and Quickstart
+
+## The traditional (non-sensical but perhaps memorable) quip:
+#
+#             ``Not all re-tangles are squares.''¹
+#
+# ¹“Square: The product obtained when a quantity is multiplied by itself.”
+#                         (derived from the American Heritage Dictionary.)
+
+## Re-Tangle provides a consistent interface for searching (whether on the
+#  web or with shell tools), filtering those results (using strict
+#  operators like NOT and NEAR to overcome the sometimes fuzzy nature
+#  of modern search engines), and launching any selected search result
+#  with the desired program (whether to preview the file, add it to a
+#  reading list, open it in a GUI tool, or send it through a shell
+#  pipeline).
+
+## Re-Tangle was inspired by Notational Velocity and attempts to extend
+#  that novel interface concept in three ways: first, to go beyond a
+#  single folder of text documents (to include multiple folders and any
+#  kind of text file, including source documents); second, to add
+#  negative search operators; and, third, to open selected files in any
+#  program the user chooses. This is not a clone, but NV users might find
+#  some operations familiar.
+#
+#  I am grateful to Zachary Schneirov and Brett Terpstra for their ingenius
+#  contributions to the lively world of personal document management.
+
+## I use Re-Tangle in five main applications, provided here as examples to
+#  illustrate what the script can do:
+#
+# 1. Re-Search
+#    Query an internet search engine and strip the results to links.
+#    This is defined in the author's alias file as a function:
+#    rese() { re-tangle -t DuckDuckGo -- "$@"; }
+#
+# 2. Re-Load
+#    Take a URL, see if Re-Tangle has already cached it, optionally create
+#    a newly cached version, and open either the URL or any cached version
+#    in any specified utility.
+#    relo() { re-tangle -t HTML -- "$@"; }
+#
+#    ...alternatively, use a lowercase "html" to act without prompting;
+#    based on the author's defaults, this will use Lynx to open the most
+#    recent cached version if any exists, or, if none exist, a copy will
+#    be retrieved, filtered, and opened.
+#    relo() { re-tangle -t html -- "$@"; }
+#
+# 3. Re-Write
+#    Send a query to Find then to Grep to locate local files, particularly
+#    those in a default notes folder (where $defaultNotesTarget is defined
+#    below as "~/Dropbox/nv").
+#    rewr() { re-tangle -t ~/Documents -- "$@"; }
+#    nv()   { re-tangle -t notes -- "$@"; }
+#
+# 4. Re-Read
+#    View a reading list (defined below in $readingList) which is a plain
+#    text file so any other utility can add to it with a simple >> append
+#    command.
+#    rere() { re-tangle -t read -- "$@"; }
+#
+# 5. Re-Member
+#    Search previous internet searches.
+#    reme() { re-tangle -t searchHistory -- "$@"; }
+#
+#  Once launched, all of these functions can be accessed from within the
+#  script. To change a target, use ",target" or ",t" instead of the "-t"
+#  flag on the command line. To select an item and act on it with defaults,
+#  enter the dot-index value printed to the left of each item (e.g., ".a").
+#  To have the script present assumptions for you to verify or adjust, use
+#  a semicolon rather than a dot (e.g., ";a").
+
+## For further information:
+#
+#  User help will be printed by running the script and entering ",help" or
+#  ",h" (both of which pretty-print $userStartMessage, found below).
+#
+#  Developers might be interested in the well-intentioned guidance in the
+#  ### Developer Notes section toward the end of this file. Chances are
+#  that those of you who are more Bashochistic than I am will find my
+#  advice to be more enthusiastic than useful. Otherwise, I hope the
+#  comments scattered throughout the code are useful.
+
+### Gather basic info
+nameSystem="$(uname -a)"
+
+## profiling
+# If "on", prints messages about how long certain steps took to process.
+# Requires Bash v.5 or higher for $EPOCHREALTIME
+profiling=off
+if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+    timeLaunch=$EPOCHREALTIME
+    exec 3>&1
+fi
+
+### Configuration options
+# Set $resultMaxLines to the desired maximum number of preview lines
+resultMaxLines=3
+
+## Define the universe of possible results.
+
+# Default notes target -- access with shortcut "n", e.g.:
+# in an alias: notes { re-tangle -t n -- "$@"; }
+# in the script: ,target n  or ,t n
+defaultNotesTarget=~/Dropbox/nv
+
+# Reading list file location
+# Add URIs to this list for later review, e.g. in Newsboat's config:
+# eg> macro o set browser "echo %u >> ~/.config/re-tangle/readingList" ;\
+# eg> open-in-browser; set browser {{back to original browser setting}}
+# Then add items in Newsboat with ``,o'' and read them later with
+# $ re-tangle -t readingList
+# or from within the script using ``,t r''
+readingList=~/.config/re-tangle/readingList
+
+# Set Find's maxdepth primary.
+# If 1, subfolders are not searched (and so can be used as archives.) If
+# >1, those levels of subfolders will be included.
+# This can be set with a "-d" flag on the command line (e.g., -d 2),
+# or the ",depth" or ",d" commands at the prompt (e.g., ",d2")
+findDepth="1"
+
+# Default kind of file accepted in document searches.
+# For local searches, these array items are used as primaries for Find.
+# For internet searches, this variable is ignored.
+# TODO: Use these as kind keywords for internet and metadata searches.
+# Set with "-k" flags on the command line -- one flag per keyword, and
+# be careful to fully escape the keyword (e.g., -k \"\*txt\" --
+# or with the ",kind" or ",k" command at the prompt (e.g., ",k *org *txt")
+findIncludeDocs=("*org" "*txt" "*sh" "*htm?" "*md" "*gv")
+
+## Set interactivity parameters.
+
+# Set the interactive prompt, which by default reads "re-tangle > "
+prompt="$(basename "$0") > "
+
+# The $indexCharacters[] array should be composed of single characters that
+# will be used as building blocks to construct the index list. Order matters.
+# Be cautious when using characters that might have another meaning within the
+# script, such as the following: , . ; - + |
+indexCharacters=( a o e i h t n s )
+
+# Cache files speed loading times and reduce redundant processing by writing
+# pre-processed lists of files to subfolders of ${fileUserPath}/cache
+# To prevent this behavior, unset this parameter or set it to anything other
+# than "yes".
+cacheListOfFiles=yes
+
+# The history file is written to ${fileUserPath}/history
+# The Bash mechanism is used for reading and acting on history that has
+# been recorded, but Bash is not used to write history; rather, commands
+# are sent to the history file with a simple >> output redirection.
+# To prevent history from being written, unset this parameter or set it to
+# anything other than "yes".
+enableHistory=yes
+
+# The intended effect of the previous two options is as follows:
+# If neither $cacheListOfFiles nor $enableHistory are set to "yes",
+# then Re-Tangle should not write anything to disk without an explicit
+# user command to do so.
+#
+# This has not been thoroughly tested. Do not use Re-Tangle if writing
+# to the disk would be disastrous. 
+
+# If you want the script to stay open in the background, which is useful
+# when you launch it as a shell (such as with a global shortcut) but which
+# will require explicit quitting, set $stayOpenInBackground to yes. Any
+# other value (e.g. "no") will end the script automatically when an item
+# is selected. Using this option ("yes") is highly recommended if
+# $cacheListOfFiles is disabled.
+stayOpenInBackground=yes
+
+# Limit the history file to a certain number of lines.
+# This is applied on exit when history is enabled; disable history within the
+# script to keep more than this number of items for the next session.
+historyLimit=1000
+
+# If $setCaseInsensitive is "yes", both Find and Grep will be set up for
+# case insensitive operation. Any other value will result in case sensitive
+# matching with both Find and Grep, including on internet search results.
+setCaseInsensitive=yes
+
+# The NEAR search operator will use $defaultCountForNear to determine how
+# far back and forward to look for the next word. This must be a zero or
+# positive integer, and is bound by the limits of the regular expression
+# engine used by Grep, often 255.
+defaultCountForNear=30
+
+# Set $useRtvForReddit if you want to open links to Reddit comments and
+# subreddits with the rtv command. If "yes", requires rtv to be installed
+# separately.
+useRtvForReddit=no
+
+## Make output pretty.
+# $useFormat refers to bold, italic, and underlined text. To test if your
+# terminal supports these formats, enter the following commands at the command
+# line:
+#
+# echo $(tput smul) testing underlined text $(tput rmul)
+# echo $(tput sitm) testing italicized text $(tput ritm)
+# echo $(tput bold) testing bold text $(tput sgr0)
+#
+# Regardless of whether such formatting is specified, the script will not send
+# any formatting codes if the system does not recognize them when the script
+# initializes. If $useFormat is unset or set to anything other than "yes",
+# formats will be ignored.
+useFormat=yes
+
+# The script provides definitions for blue, dark green, light green, yellow,
+# and an alternate background color. However, using even a limited palette of
+# colors can cause terminal emulators to visibly slow down. The use of these
+# or other colors will be disabled if $useColor is unset or set to anything
+# other than "yes".
+useColor=yes
+
+if [ ! -z "$useFormat" ] && [ "$useFormat" = "yes" ]; then
+
+    # Check terminal capabilities
+    # Test for color count, then bold, underline, italics, and normal
+    colorCount=$(tput colors 2>/dev/null)
+    tput bold >/dev/null 2>&1; tputErr=$?
+    if [ $tputErr = 0 ]; then bold=$(tput bold); fi
+    tput smul >/dev/null 2>&1; tputErr=$?
+    if [ $tputErr = 0 ]; then underline=$(tput smul); fi
+    tput rmul >/dev/null 2>&1; tputErr=$?
+    if [ $tputErr = 0 ]; then nounderline=$(tput rmul); fi
+    tput sitm >/dev/null 2>&1; tputErr=$?
+    if [ $tputErr = 0 ]; then italic=$(tput sitm); fi
+    tput ritm >/dev/null 2>&1; tputErr=$?
+    if [ $tputErr = 0 ]; then noitalic=$(tput ritm); fi
+    tput sgr0 >/dev/null 2>&1; tputErr=$?
+    if [ $tputErr = 0 ]; then normal=$(tput sgr0); fi
+    unset tputErr
+
+fi
+
+if [ ! -z "$useColor" ] && [ "$useColor" = "yes" ]; then
+
+    # Set color definitions
+    if [ $colorCount -lt 7 ]; then
+	:
+	# TODO for -1 (mono) or 0-7-only terminals
+
+    elif [ $colorCount -lt 17 ]; then
+	colorBackground=8
+	colorBlue=4
+	colorDarkGreen=10
+	colorLightGreen=2
+	colorYellow=3
+
+    elif [ $colorCount -gt 255 ]; then
+	colorBackground=235
+	colorBlue=153
+	colorDarkGreen=115
+	colorLightGreen=121
+	colorYellow=228
+
+	# TODO for thousands or more colors
+	# Below are RGB estimates for the 256-color values above
+	# Background  ~ #262626
+	# Blue        ~ #9cf
+	# Dark Green  ~ #6c9
+	# Light Green ~ #6f9
+	# Yellow      ~ #ff6
+    fi
+
+    # OpenBSD's tput requires three arguments
+    # TODO investigate -- this only happens in some conditions.
+    if [ "${nameSystem:0:7}" = "OpenBSD" ]; then
+	for color in colorBackground colorBlue colorDarkGreen colorLightGreen colorYellow
+	do
+	    eval $color=\""$(<<< ${!color} sed 's/\(.*\)/\1 1 1/')"\"
+	done
+    fi
+
+    for color in colorBlue colorDarkGreen colorLightGreen colorYellow
+    do
+	eval $color=\""$(tput setaf ${!color})"\"
+    done
+
+    for color in colorBackground
+    do
+	eval $color=\""$(tput setab ${!color})"\"
+    done
+
+fi
+
+# Set formatting shortcuts:
+# This is the "theme" section.
+# Invalid formatting should dereference to a null string if it would be invalid
+# on the current terminal.
+
+# formatIndex            == .a .b .c etc
+formatIndex="$normal$colorYellow"
+# formatResults          == filename1.org filename2.txt http://website.etc
+formatResult="$bold"
+# formatPreview          == contents of file listed after the result name
+formatPreview="$italic$colorBlue"
+# formatQueryReminder    == the query terms used
+formatQueryReminder="$colorLightGreen"
+# formatQueryInformation == other info about the query: target, hits, etc
+formatQueryInformation="$colorDarkGreen$colorBackground$italic"
+
+## Back-end configuration.
+
+# Determine system utilities base: assuming either GNU or BSD
+nameSystemNoGNU="${nameSystem/GNU}"
+if [ "$nameSystem" = "$nameSystemNoGNU" ]; then
+    system=BSD
+else
+    system=GNU
+fi
+unset nameSystemNoGNU
+
+# Set 'stat' command to get a file's last modified time
+case $system in
+    BSD)
+	statCommand="stat -f %m"
+	;;
+
+    GNU)
+	statCommand="stat -c %Y"
+	;;
+esac
+
+# Set the base folder: config files, filters, histories, and temporary
+# files will be stored in or under $fileUserPath.
+fileUserPath=~/.config/re-tangle
+
+# Designate which folders to look to for common Re-Tangle settings, and to
+# read/write temporary files.
+# TODO: use XDGDATA folder if present by default.
+fileCachePath=${fileUserPath}/cache
+fileAutocensorRegExps=${fileUserPath}/filters/autocensor
+fileBrightlistRegExps=${fileUserPath}/filters/brightlist
+
+# $openWithCommand sets the default command that will be used to open
+# selected files. $fileTypeAssociations[] is intended to be used by
+# openFileWith(), but that has not been set up yet. 
+#
+# Note that if an alias is used as the default $openWithCommand, this
+# script might need to load aliases (see below) to understand that alias.
+openWithCommand=ec
+filetypeAssociations=("*\.txt ec" \
+			  "*\.org ec" \
+			  "*\.sh ec" \
+			  "*\.htm? w3m")
+
+# The script can open any selected file with an arbitrary command. If that
+# command comes from a Bash function in ~/.bashrc, then ~/.bashrc needs to
+# be sourced. If it comes from an alias, then the aliases file needs to be
+# sourced and alias expansion needs to be turned on (with the -e flag for
+# affected 'read' commands).
+useBashrc=no
+useBashAliases=yes
+
+# Configure the curl command.
+
+# Using "torsocks curl" might work, but please be careful to set other options
+# as needed to protect your anonymity (and, by extension, that of others).
+curlCommand="curl "
+#curlCommand="torsocks curl "
+
+# Adding -S tells curl to display error messages, which can help if you're not
+# sure whether a problem is due to a connection issue or a filter issue.
+#curlCommand+="-S "
+
+# Adding --progress-bar provides a simple notification that curl is working.
+# This appears to cause junky output on OpenBSD, so this is off by default
+# in that case.
+if [ ! "${nameSystem:0:7}" = "OpenBSD" ]; then
+    curlCommand+="--progress-bar "
+fi
+
+# The -H flag specifies header messages to send. The following flags attempt
+# to mimic the appearance of a Tor browser on Windows.
+curlCommand+="-H \"Accept: text/html,application/xhtml+xml,"
+curlCommand+="application/xml;q=0.9,*/*;q=0.8\" "
+# Note that the accept-encoding header of Tor Browser also includes "br" for
+# Brotli compression, which is hard to accommodate here because (a) Google's
+# CLI tool does not offer a pass-through option (like gunzip -f), so br needs
+# to be detected and only then added to the pipeline; and (b) it adds an
+# uncommon dependency. Still, if anonymity is important to you, /not/ accepting
+# br-compressed documents will substantially add to your fingerprint.
+#curlCommand+="-H \"Accept-Encoding: gzip, deflate, br\" "
+curlCommand+="-H \"Accept-Encoding: gzip, deflate\" "
+curlCommand+="-H \"Accept-Language: en-US,en;q=0.5\" "
+curlCommand+="-H \"User-Agent: Mozilla/5.0 (Windows NT 6.1; rv:60.0) "
+curlCommand+="Gecko/20100101 Firefox/60.0\" "
+curlCommand+="-H \"Upgrade-Insecure-Requests: 1\" "
+
+### Major Functions
+
+## buildListOfFiles() creates and updates listOfFiles[]
+buildListOfFiles()
+{
+    ## The $listOfFiles[] database has file names and text contents.
+    #
+    # $listOfFiles[] starts with a header from elements 0 through 8. These
+    # are specified below under "# Add header to listOfFiles"
+    #
+    # $listOfFiles[9] contains the base "universe" of search results. That is,
+    # it contains all results from the search engine, whether from the
+    # internet, find, or another tool, plus any contents that the user might
+    # also want to search.
+    #
+    # This is definitely a work-in-progress. Ideally, ${listOfFiles[0]} will
+    # contain the address of the first content element, then the remaining
+    # header elements will be paired in metadata-type, metadata-contents order.
+    # This means that the first content element -- the base "universe" of
+    # search results -- can always be addressed as:
+    # ${listOfFiles[ ${listOfFiles[0]} ]}
+    #
+    # The format for $listOFFiles[9] and subsequent elements is:
+    # ^[[:digit:]]\{1,\} -- start with digits for sorting: with files, a
+    #     timestamp in seconds from Epoch; with internet searches, this is just
+    #     an ordinal value. The number only needs to be consistent within a
+    #     given list.
+    # $'\x12' -- delimiter between all fields within a record resource
+    # name -- in the long run, this should be a URI, but for now, both URI
+    #     (internet) and file path (Unix-style) work.
+    # $'\x12'
+    # resource contents -- if desired
+    # $'\n' -- the newline marks end of record, so files with names that
+    #     include a newline are not not handled correctly.
+    # ($'\x14' had been the record delimiter, but now it is just a newline.
+    #     So, if you see an x14, that's its ancestry.)
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeBuildListOfFilesBegan=$EPOCHREALTIME
+	bcString="($timeBuildListOfFilesBegan - $timeLaunch)"
+	bcString+=" * 1000/1; scale=0"
+	message="up to buildListOfFiles() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	profileMsg "$message"
+    fi
+
+    # Launch the notification system in the background
+    if [ -t 1 ]; then
+	if [ ${#query[@]} -gt 0 ]; then
+	    waitForAWhile &
+	    waitingPID="$!"
+	fi
+    fi
+
+    # Create cache file
+
+    # This assumes the cache directory is writable; if $cacheFile is not
+    # writable for permissions reasons, the entire cache structure is
+    # problematic, which might be the case when cache is turned off.
+    # TODO error handling for poorly set cache path: getOptions()?
+
+    # 'dirname' loosely tested to work across Debian 9.8, OpenBSD 6.4,
+    # and macOS 10.14.
+
+    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	if [ ! -d "$(dirname "${cacheFile}")" ]; then
+	    mkdir -p "$(dirname "${cacheFile}")"
+	    touch "${cacheFile}"
+	fi
+    fi
+
+    ## Build database from local directory.
+    if [ "$targetKind" = "localFolder" ]; then
+
+	unset listOfFiles
+	# test cache against current files
+	if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+
+	    mapCacheFile
+
+	    sedString="s/^[[:digit:]]*[[:cntrl:]]"
+	    sedString+="\([^[:cntrl:]]*\)[[:cntrl:]].*$"
+	    sedString+="/\1/"
+	    cachedList="$(echo "${listOfFiles[9]}" | \
+			       sed -e "$sedString" -e '/^$/d' | \
+			       sort)"
+	    unset sedString
+	fi
+
+	# Avoid pathname expansion with findInclude (eg "*txt")
+
+	# Test if Bash's "f" option is set
+	for ((count=1; count <= ${#-}; count++)); do
+	    if [ "${-:${count}:1}" = "f" ]; then
+		shellSetNoglob="on"
+		break
+	    fi
+	done
+
+	# If "f" is not set, do that now
+	if [ -z "$shellSetNoglob" ]; then
+	    set -o noglob
+	fi
+
+	# Gather "universe" of file names in $currentList
+	unset currentList
+	for ((count=0; count < ${#findInclude[@]}; count++)); do
+	    findString="${target}"
+	    findString+=" -maxdepth \"$findDepth\" -type f"
+	    findString+=" -$findName \"${findInclude[$count]}\""
+	    currentList+="$(echo; eval find "$findString")"
+	done
+	unset findString
+	currentList="$(echo "$currentList" | sort | uniq)"
+
+	# Compare that list with any existing cache
+	if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	    diffList="$(diff \
+			<(echo "$cachedList") \
+			<(echo "$currentList"))"
+
+	    removeFromCache="$(echo "$diffList" | \
+				sed -n 's/^< \(.*$\)/\1/p' | \
+				sort | uniq)"
+
+	    addToCache="$(echo "$diffList" | \
+			    sed -n 's/^> \(.*$\)/\1/p' | \
+			    sed -e /^$/d)"
+
+	    # Recently modified files need to be both removed and added
+	    # to update their entries; to that end, replace $currentList
+	    # with matching files that are newer than the cachefile
+	    unset currentList
+	    for ((count=0; count < ${#findInclude[@]}; count++)); do
+		findString="${target}"
+		findString+=" -maxdepth \"$findDepth\" -type f"
+		findString+=" -$findName \"${findInclude[$count]}\""
+		if [ -r "$cacheFile" ]; then
+		    findString+=" -newer \"$cacheFile\""
+		fi
+		currentList+="$(echo; eval find "$findString")"
+		unset findString
+	    done
+	fi
+
+	# Resume pathname expansion if not previously unset
+	if [ -z "$shellSetNoglob" ]; then
+	    set +o noglob
+	fi
+	unset shellSetNoglob
+
+	if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	    # If there are files newer than the cache file,
+	    if [ ! -z "$currentList" ]; then
+		# merge those file names with other to-be-removed file names
+		if [ ! -z "$removeFromCache" ]; then
+		    removeFromCache+=$'\n'"$currentList"
+		else
+		    removeFromCache="$currentList"
+		fi
+
+		# ...but also add them to the list of new files
+		if [ ! -z "$addToCache" ]; then
+		    addToCache+=$'\n'"$currentList"
+		else
+		    addToCache="$currentList"
+		fi
+	    fi
+
+	    # Cull cache
+	    if [ ! -z "$removeFromCache" ]; then
+
+		removeFromCache="$(echo "$removeFromCache" | sed \
+		    -e '/^$/d' \
+		    -e 's=\/=\\\/=g' \
+		    -e 's=\.=\\\.=g' \
+		    -e 's=^=/^[[:digit:]]*[[:cntrl:]]=' \
+		    -e 's=$=/d=')"
+
+		listOfFiles[0]="$(echo "${listOfFiles[9]}" | \
+		    sed -f <(echo "$removeFromCache"))"
+
+	    else
+		listOfFiles[0]="${listOfFiles[9]}"
+	    fi
+
+	else
+	    # If the cache system is turned off, there is no cache to add to
+	    # or remove from, so everything needs to be added to the "cache" --
+	    # use "addToCache" as a placeholder, not actually using cache here
+	    addToCache="$currentList"
+	fi
+
+	# Grow cache
+	if [ ! -z "$addToCache" ]; then
+	    itemsToAdd=$(( $(echo "$addToCache" | wc -l) ))
+	    unset linesToAdd
+	    for ((count=1; count <= $itemsToAdd; count++)); do
+		# TODO: use read here
+		createListItem "$(echo "$addToCache" | sed -n ${count}p)"
+		linesToAdd+="$newListItem"$'\n'
+	    done
+
+	    listOfFiles[0]+="$(echo "$linesToAdd" | sort | uniq)"
+	fi
+
+    ## Build list of links from listOfURIs
+    elif [ "${targetKind}" = "listOfURIs" ]; then
+
+	unset listOfFiles
+	unset arrayOfURIs
+
+	# Read $target into an array arrayOfURIs, one URI per line
+
+	# If $target is a .gz file, change $target
+	# from a filename
+	# into a list of URIs string
+	if [ -r "${target}" ] && [ "${target: -3}" = ".gz" ]; then
+	    target="$(gunzip -qfc "$target")"
+	fi
+	
+	# If $target is a file
+	if [ -r "${target}" ]; then
+	    lines="$(eval echo {0..$(( $(< "${target}" wc -l) - 1 ))})"
+	    for line in $lines; do
+		read arrayOfURIs[$line]
+	    done < "${target}"
+
+	# If $target is a string
+	elif [ -n "${target}" ]; then
+	    lines="$(eval echo {0..$(( $(<<< "${target}" wc -l) - 1))})"
+	    for line in $lines; do
+		read arrayOfURIs[$line]
+	    done <<< "${target}"
+
+	else
+	    echo "Unrecognized target (\"$target\"). Quitting." >&2
+	    exit
+	fi
+
+	# Remove duplicate entries
+	while true; do
+	    # Identify duplicate entries...
+	    unset sortURIs
+	    for ((count=0; count < ${#arrayOfURIs[@]}; count++)); do
+		sortURIs+="${arrayOfURIs[$count]}"$'\n'
+	    done
+	    removeURIs=($(echo "$sortURIs" | sort | uniq -d))
+
+	    if [ "${#removeURIs[@]}" -eq 0 ]; then
+		break
+	    fi
+
+	    # ...and remove them.
+	    for ((toDel=0; toDel < ${#removeURIs[@]}; toDel++)); do
+		for ((listed=0; listed < ${#arrayOfURIs[@]}; listed++)); do
+		    testOne="${arrayOfURIs[$listed]}"
+		    testTwo="${removeURIs[$toDel]}"
+		    if [ "$testOne" = "$testTwo" ]; then
+			# Don't unset here; an empty entry allows counting
+			arrayOfURIs[$listed]=""
+			continue 2
+		    fi
+		done
+	    done
+	    unset testOne
+	    unset testTwo
+	done
+
+	# Build interim listOfFiles[]
+	# Going from list of lines (index 1) to an array (index 0)
+	for ((countAOU=$(( ${#arrayOfURIs[@]} - 1 )); countAOU >= 0 ; countAOU--)); do
+	    if [ -z "${arrayOfURIs[$countAOU]}" ]; then
+		continue
+	    fi
+
+	    # The first entry is just that, but
+	    # subsequent entries get newline prefaces
+	    if [ -z "${listOfFiles[0]}" ]; then
+		listOfFiles[0]="$countAOU"$'\x12'
+		listOfFiles[0]+="${arrayOfURIs[$countAOU]}"$'\x12'
+	    else
+		listOfFiles[0]+=$'\n'"$countAOU"$'\x12'
+		listOfFiles[0]+="${arrayOfURIs[$countAOU]}"$'\x12'
+	    fi
+
+	    # Append rendered text to this line if a cached version is found
+	    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+		testIfWebpageIsCached "${arrayOfURIs[$countAOU]}"
+		if [ ${#matchedFileNames[@]} -gt 0 ]; then
+		    renderedFileName="$(echo "${matchedFileNames[0]}" | sed \
+				  -e 's/filtered\.html\.gz/rendered\.txt\.gz/')"
+		    listOfFiles[0]+="$(gunzip -qc "$renderedFileName" | \
+					 tr '\n\t' ' ' | \
+					 sed 's/ \{2,\}/ /g')"
+		    listOfFiles[0]+=$'\x12'
+		    unset matchedFileNames
+		fi
+	    fi
+	done
+    else
+	echo "Unrecognized \$targetKind for buildListOfFiles()." >&2
+	return 1
+    fi
+
+    ## Add header to listOfFiles[]
+    # The header should contain enough info to re-create the entire query,
+    # despite containing the query results in the following element. This
+    # allows information about previous queries to be displayed; and, when
+    # cached, this allows cache files to be opened, re-run, and modified.
+
+    # First element is a count of header lines, meaning that:
+    # ${listOfFiles[${listOfFiles[0]}]} will be the content element
+    # Subsequent header elements are in type-value pairs,
+    # with elements delimited by $'\x14'
+
+    listOfFiles[9]="${listOfFiles[0]}"
+
+    headerLineCount=9
+
+    listOfFiles[0]="$headerLineCount"
+    listOfFiles[0]+=$'\n'
+
+    headerLineOne="targetKind"
+    listOfFiles[1]="$headerLineOne"
+    listOfFiles[1]+=$'\n'
+
+    headerLineTargetKind="$targetKind"
+    listOfFiles[2]="$headerLineTargetKind"
+    listOfFiles[2]+=$'\n'
+
+    headerLineThree="target"
+    listOfFiles[3]="$headerLineThree"
+    listOfFiles[3]+=$'\n'
+
+    headerLineTarget="${metadataTarget:-$target}"
+    listOfFiles[4]="$headerLineTarget"
+    listOfFiles[4]+=$'\n'
+
+    headerLineFive="query"
+    listOfFiles[5]="$headerLineFive"
+    listOfFiles[5]+=$'\n'
+
+    headerLineQuery="${metadataQuery:-$query}"
+    listOfFiles[6]="$headerLineQuery"
+    listOfFiles[6]+=$'\n'
+
+    headerLineSeven="includeKind"
+    listOfFiles[7]="$headerLineSeven"
+    listOfFiles[7]+=$'\n'
+
+    headerLineKind="${findInclude[@]}"
+    listOfFiles[8]="$headerLineKind"
+    listOfFiles[8]+=$'\n'
+
+    ## Write listOfFiles[] to cache
+    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	# Forcing gzip here overwrites existing cachefiles
+	echo "${listOfFiles[@]}" | gzip -1qf > "$cacheFile"
+    fi
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeBuildListOfFilesDone=$EPOCHREALTIME
+	bcString="($timeBuildListOfFilesDone - $timeBuildListOfFilesBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="buildListOfFiles() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	profileMsg "$message"
+    fi
+}
+
+## main() in which our hero accepts and parses commands
+main()
+{
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeMainBegan=$EPOCHREALTIME
+    fi
+
+    while true; do
+	if [ "${#query[@]}" -gt 0 ] || [ ! -z "$resultItems" ]; then
+
+	    ## Print status line
+	    case "${targetKind}" in
+		localFolder)
+		    prettyFolder="$(echo "${metadataTarget:-$target}" | sed \
+					 -e s=${fileCachePath}={cache}= \
+					 -e s=$HOME=~=)"
+		    statusTextLeft="${formatQueryInformation}${prettyFolder}: "
+		    statusTextLeft+="${formatQueryReminder}${query[@]}"
+
+		    statusTextRight="${formatQueryInformation}${itemCount:-0}"
+		    statusTextRight+=" hits in "
+		    statusTextRight+="$(echo "${listOfFiles[${listOfFiles[0]}]}" | \
+					     sed '/^$/d' | wc -l | bc)"
+		    statusTextRight+=" files in "
+		    statusTextRight+="${findInclude[@]}"
+		    ;;
+
+		listOfURIs)
+		    statusTextLeft="${listOfFiles[4]}: "
+		    statusTextLeft+="${formatQueryReminder}"
+		    statusTextLeft+="${listOfFiles[6]}"
+
+		    if [ "${#query[@]}" -gt 0 ]; then
+			statusTextLeft="(${statusTextLeft}) ${query[@]}"
+		    fi
+
+		    statusTextLeft="${formatQueryInformation}${statusTextLeft}"
+
+		    statusTextRight="${formatQueryInformation}${itemCount:-0}"
+		    statusTextRight+=" displayed of "
+		    statusTextRight+="$(echo "${listOfFiles[${listOfFiles[0]}]}" | \
+					     sed '/^$/d' | wc -l | bc)"
+		    statusTextRight+=" hits"
+		    ;;
+	    esac
+
+	    echo -n $(tput cub $(tput cols))
+
+	    # An absurd number (333) of spaces are added here to cover very
+	    # wide terminals; adding them programmatically in chunks made some
+	    # versions of Bash fail, apparently due to the seemingly empty
+	    # string (?). The string is then cropped programmatically.
+	    echo "${statusTextLeft}                                            \
+                                                                               \
+                                                                               \
+                                                                               \
+                                                   "  | \
+		cut -c 1-$(( $(tput cols) - ${#statusTextLeft} + \
+					  ${#formatQueryReminder} + \
+					  ${#formatQueryInformation} )) | \
+		tr -d $'\n'
+
+	    echo "$(tput cub $(tput cols))$(tput cuf \
+		$(( $(tput cols) - \
+		    ${#statusTextRight} + \
+		    ${#formatQueryInformation} )) \
+		)${statusTextRight}${normal}"
+	fi
+
+	## Warn about duplicate index characters
+	#  This goes here because an earlier warning would precede either the
+	#  index character function or the warning message function.
+	if [ ! -z "$warnDuplicateIndexChars" ]; then
+	    #  Do not warn to piped output
+	    #  because index chars don't affect those results.
+	    if [ -t 1 ]; then
+		echo $duplicateIndexChars | fold -s >&2
+		unset warnDuplicateIndexChars
+	    fi
+	fi
+
+	## Read interactive input
+
+	if [ -r "$historyFile" ]; then
+	    history -n $historyFile
+	fi
+
+	read -p "$prompt" -e retangleCommand
+
+	if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	    timeReadReturned=$EPOCHREALTIME
+	fi
+
+	## Save history
+	if [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]; then
+	    if [ -w "$historyFile" ] || [ -w "$fileUserPath" ]; then
+		if [ "${retangleCommand:0:2}" != ",t" ]; then
+		    echo $retangleCommand >> "$historyFile"
+		# else: history logging is the responsibility of each
+		# , command operation in the case statement below.
+		fi
+	    else
+		echo -e "History file not accessible: could not write to:\n\t$fileUserPath\nDisabling history recording." | fold -s >&2
+		enableHistory=no
+	    fi
+	fi
+
+	## Pre-case parsing (a substitute for the ;;& syntax)
+	case "$retangleCommand" in
+	    \;*)
+		if [ ${#retangleCommand} -gt 1 ]; then
+		    flagPromptBeforeOpening=yes
+		    retangleCommand=".${retangleCommand:1}"
+		fi
+		;;
+
+	    AND*|OR*|NOT*|NOR*|+*|-*|\|*|BEFORE*|AFTER*|NEAR*)
+		query=(${query[@]} $retangleCommand)
+		flagQueryOperatorBeginsCommand=yes
+
+		if [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]
+		then
+		    echo "${query[@]}" >> "$historyFile"
+		fi
+		;;
+	esac
+
+	## commands: ,all through ,history
+	case "$retangleCommand" in
+
+	    ,a|,all)
+		unset query
+		updateResults
+		printResults
+		;;
+
+	    ,c|,cache|,cacheResults)
+		if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+		    :
+		else
+		    # TODO add step to confirm intention
+		    echo "Enabling file caching." >&2
+		    cacheListOfFiles=yes
+		fi
+
+		# Get the list of URIs to cache
+		if [ "$targetKind" = listOfURIs ]; then
+		    notice="Caching uncached results: "
+		    printf %s "$notice"
+		    sedString="s/^[[:digit:]]*"
+		    sedString+=$'\x12'
+		    sedString+="\\([^"
+		    sedString+=$'\x12'
+		    sedString+="]*\\)"
+		    sedString+=$'\x12'
+		    sedString+=".*$"
+		    sedString+="/\\1/"
+		    listOfResultURIs="$( <<< "${listOfFiles[$grepElements]}" \
+				      sed -e $sedString )"
+
+		    # Open each URI in turn in the background
+		    for ((countCache=1; $countCache <= $itemCount; countCache++)); do
+			read URIToCache
+			testIfWebpageIsCached "$URIToCache"
+			if [ ${#matchedFileNames[0]} -eq 0 ]; then
+			    curlSilent=" -s "
+			    actOnFile="$URIToCache"
+			    cacheAndFilterHTML &
+			    cacheAndFilterPIDs+=($!)
+			fi
+		    done <<< "$listOfResultURIs"
+
+		    # Track progress and provide updates
+		    processesRemain=$(( $(ps ${cacheAndFilterPIDs[@]} | wc -l) - 1 ))
+		    while [ "$processesRemain" -gt 0 ]; do
+			tput cub $(tput cols)
+			tput cuf ${#notice}
+			printf %s "$(( $itemCount - $processesRemain ))/$itemCount"
+			sleep 0.250
+			processesRemain=$(( $(ps ${cacheAndFilterPIDs[@]} | wc -l) - 1 ))
+		    done
+
+		    # When done, clean up and reset the search
+		    printf \\n
+		    unset cacheAndFilterPIDs
+
+		    buildListOfFiles
+		    updateResults
+		    printResults
+
+		else
+		    echo ",cacheResults does not apply in this context." 2>&1
+		fi
+		;;
+
+	    ,d*|,depth*)
+		case "${retangleCommand: -1}" in
+		    [[:digit:]])
+			findDepth="$(echo "$retangleCommand" | \
+				   sed 's/^,d.*\([[:digit:]]\{1,\}\)$/\1/')"
+			echo $findDepth
+			;;
+
+		    *)
+			trap continue 2
+			read -e -p "set \$findDepth to [${findDepth}]: " readFindDepth
+			trap cleanExit 2
+
+			if [ ! -z "$readMaxDepth" ]; then
+			    findDepth="$readFindDepth"
+			fi
+			;;
+		esac
+
+		buildListOfFiles
+		updateResults
+		printResults
+		;;
+
+	    ,h|,help)
+		echo -e "$userStartMessage" | fold -s | more
+		;;
+
+	    ,hi|,history)
+		if [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]; then
+		    enableHistory=no
+
+		    if [ ! -z $enableHistoryDefault ]; then
+			if [ "$enableHistoryDefault" = "yes" ]; then
+			    echo "History logging temporarily disabled. Edit the configuration or script to make this permament." | fold -s
+			else
+			    echo "History logging reverted to original, disabled state."
+			fi
+		    fi
+
+		else
+		    enableHistory=yes
+
+		    if [ ! -z $enableHistoryDefault ]; then
+			if [ "$enableHistoryDefault" = "yes" ]; then
+			    echo "History logging reverted to original, enabled state."
+			else
+			    echo "History logging temporarily enabled. Edit the configuration or script to make this permanent." | fold -s
+			fi
+		    fi
+		fi
+		continue
+		;;
+
+	    ## commands: ,index
+	    ,i*|,index*|,indexchars*|,indexChars*)
+		setIndexCharacters "$(echo "$retangleCommand" | \
+				   sed 's/[^[:blank:]]* \(.*\)$/\1/')"
+
+		# Update existing results with the new index characters
+		if [ ! -z "$itemCount" ]; then
+		    buildIndexSkipCountCheck=yes
+		    buildIndex $itemCount
+		    printResults
+		fi
+		;;
+
+	    ## commands: ,kind
+	    ,k|,kind)
+		# Avoid pathname expansion here
+		for ((count=1; count <= ${#-}; count++)); do
+		    if [ "${-:${count}:1}" = "f" ]; then
+			shellSetNoglob="on"
+			break
+		    fi
+		done
+
+		if [ -z "$shellSetNoglob" ]; then
+		    set -o noglob
+		fi
+
+		# read doesn't like expanding an array in its prompt text, so
+		# use an intermediary.
+		defaultText="${findInclude[@]}"
+
+		# Trap Control-C so that it breaks from this command without
+		# exiting the script
+		trap continue 2
+		read -e -p "set \$findInclude to [${defaultText}]: " readKind
+		trap cleanExit 2
+
+		# Define array
+		if [ ! -z $readKind ]; then
+		    findInclude=(${readKind})
+		fi
+
+		# Reset noglob if it was changed
+		if [ -z "$shellSetNoglob" ]; then
+		    set +o noglob
+		fi
+		unset shellSetNoglob
+
+		if [ ! -z $enableHistory ]; then
+		    if [ "$enableHistory" = "yes" ]; then
+			if [ -w "$historyFile" ] \
+			       || [ -w "$fileUserPath" ]
+			then
+			    echo ",kind $readKind" >> "$historyFile"
+			fi
+		    fi
+		fi
+
+		# Refresh search results with new $findInclude in place
+		buildListOfFiles
+		updateResults
+		printResults
+
+		continue
+		;;
+
+	    ,k[[:blank:]]*|,kind[[:blank:]]*)
+		# Avoid pathname expansion here
+		for ((count=1; count <= ${#-}; count++)); do
+		    if [ "${-:${count}:1}" = "f" ]; then
+			shellSetNoglob="on"
+			break
+		    fi
+		done
+
+		if [ -z "$shellSetNoglob" ]; then
+		    set -o noglob
+		fi
+
+		readKind="$(echo "$retangleCommand" | \
+			sed 's/^[^[:blank:]]* \(.*\)$/\1/')"
+
+		findInclude=(${readKind})
+
+		if [ -z "$shellSetNoglob" ]; then
+		    set +o noglob
+		fi
+		unset shellSetNoglob
+
+		if [ ! -z $enableHistory ]; then
+		    if [ "$enableHistory" = "yes" ]; then
+			if [ -w "$historyFile" ] \
+			       || [ -w "$fileUserPath" ]
+			then
+			    echo ",kind $kindCommand" >> "$historyFile"
+			fi
+		    fi
+		fi
+
+		buildListOfFiles
+		updateResults
+		printResults
+
+		continue
+		;;
+
+	    ## commands: ,more
+	    ,more)
+		# Get more results from the search engine
+		if [ -z "$queryURLpage" ]; then
+		    queryURLpage=1
+		else
+		    ((queryURLpage++))
+		fi
+
+		target=${listOfFiles[4]}
+		query=(${listOfFiles[6]})
+
+		parseTargetArgument
+		continue
+		;;
+
+	    ## commands: ,openWith
+	    ,o|,open|,open[Ww]ith)
+		trap continue 2
+		read -e -p "Set \$openWithCommand to [$openWithCommand]: " \
+		     readOpenWithCommand
+		trap cleanExit 2
+
+		if [ ! -z "$readOpenWithCommand" ]; then
+		    openWithCommand="$readOpenWithCommand"
+
+		    if [ ! -z $enableHistory ]; then
+			if [ "$enableHistory" = "yes" ]; then
+			    if [ -w "$historyFile" ] \
+			    || [ -w "$fileUserPath" ]
+			    then
+				echo ",openWith $openWithCommand" \
+				     >> "$historyFile"
+			    fi
+			fi
+		    fi
+		fi
+		continue
+		;;
+
+	    ,o[[:blank:]]*|,open[[:blank:]]*|,open[Ww]ith[[:blank:]]*)
+		openWithCommand="$(echo "$retangleCommand" | \
+			sed 's/^[^[:blank:]]* \(.*\)$/\1/')"
+
+		if [ ! -z $enableHistory ]; then
+		    if [ "$enableHistory" = "yes" ]; then
+			if [ -w "$historyFile" ] || [ -w "$fileUserPath" ]; then
+			    echo ",openWith $openWithCommand" >> "$historyFile"
+			fi
+		    fi
+		fi
+		continue
+		;;
+
+	    ## commands: ,p through ,s
+	    ,p|,print)
+		# Use when the list of results has scrolled off the screen
+		printResults
+		continue
+		;;
+
+	    ,q)
+		break
+		;;
+
+	    ,rm*|,remove*|,removeItem*)
+		# TODO: move to own function.
+		removeItemIndex="$(printf %s "$retangleCommand" | \
+				     sed 's/^[^[:blank:]]*[[:blank:]]\(.*\)$/\1/')"
+
+		# If no index entered, default to first value
+		if [ ${#removeItemIndex} -eq 0 ]; then
+		    removeItemIndex=${indexCharacters[0]}
+
+		# If the index has a dash, treat it as a range
+		elif [ ! "$removeItemIndex" = "${removeItemIndex%%-*}" ]; then
+		    unset removeItemIndexEnd
+		    removeItemIndexEnd="${removeItemIndex##*-}"
+		    removeItemIndex="${removeItemIndex%%-*}"
+
+		    indexReverse ${removeItemIndexEnd#.}
+		    indexLookupReturn=$?
+		    if [ $indexLookupReturn -eq 0 ]; then
+			indexValueEnd=$indexValue
+			removeRange=yes
+		    fi
+		fi
+
+		indexReverse ${removeItemIndex#.}
+		indexLookupReturn=$?
+
+		if [ $indexLookupReturn -eq 0 ]; then
+		    if [ $indexValue -le $itemCount ]; then
+
+			if [ -d "${metadataTarget:-$target}" ]; then
+			    # remove item from a directory
+			    # TODO
+			    echo "Using ,removeItem to remove files is not supported. Perhaps try ;${removeItemIndex#.} and then enter \"rm\" at the \"Open file with\" prompt." | fold -s >&2
+
+			elif [ -w "${metadataTarget:-$target}" ]; then
+			    # remove item from a file
+			    # indexValue is 0-index. File lines are 1-index.
+			    indexValue=$(( $indexValue + 1 ))
+
+			    if [ -z "$removeRange" ]; then
+				sed -i~ ${indexValue}d "${metadataTarget:-$target}"
+
+			    else
+				indexValueEnd=$(( $indexValueEnd + 1 ))
+
+				# Ensure range is lowest,highest
+				if [ $indexValueEnd -lt $indexValue ]; then
+				    indexValueStart=$indexValueEnd
+				    indexValueEnd=$indexValue
+				    indexValue=$indexValueStart
+				    unset indexValueStart
+				fi
+
+				sed -i~ ${indexValue},${indexValueEnd}d \
+				       "${metadataTarget:-$target}"
+
+			    unset removeRange
+			    fi
+
+			    buildListOfFiles
+			    updateResults
+			    printResults
+
+			else
+			    # remove item from an automatically generated list
+			    # TODO
+			    echo "Using ,removeItem to remove items from automatically generated lists is not supported. Perhaps try a NOT search operator." | fold -s >&2
+			fi
+		    else
+			printf %s\\n "$warningUnrecognizedDotValue" | fold -s
+		    fi
+		else
+		    printf %s\\n "$warningUnrecognizedDotValue" | fold -s
+		fi
+
+		;;
+
+	    ,s|,search)
+		newInternetSearch
+		continue
+		;;
+
+	    ,s[[:blank:]]*|,search[[:blank:]]*)
+		readQuery="$(echo "$retangleCommand" | \
+				sed 's/^[^[:blank:]]*[[:blank:]]\(.*\)$/\1/')"
+
+		if [ -z "$preferredInternetSearchTarget" ]; then
+		    newInternetSearch
+		else
+		    query=($readQuery)
+		    target="$preferredInternetSearchTarget"
+		    parseTargetArgument
+		fi
+
+		continue
+		;;
+
+	    ## commands: ,t through ,u
+	    ,t|,target)
+		trap continue 2
+		read -e -p "New target: " target
+		trap cleanExit 2
+
+		if [ ! -z $enableHistory ]; then
+		    if [ "$enableHistory" = "yes" ]; then
+			if [ -w "$historyFile" ] \
+			|| [ -w "$fileUserPath" ]
+			then
+			    echo ",target ${target}" >> "$historyFile"
+			fi
+		    fi
+		fi
+
+		parseTargetArgument
+		continue
+		;;
+
+	    ,t[[:blank:]]*|,target[[:blank:]]*)
+		target="$(echo "$retangleCommand" | \
+					  sed 's/^[^[:blank:]]* \(.*\)$/\1/')"
+
+		if [ ! -z $enableHistory ]; then
+		    if [ "$enableHistory" = "yes" ]; then
+			if [ -w "$historyFile" ] \
+			|| [ -w "$fileUserPath" ]
+			then
+			    echo ",target ${target}" >> "$historyFile"
+			fi
+		    fi
+		fi
+
+		parseTargetArgument
+		continue
+		;;
+
+	    ,u|,update)
+		# Use when the files being searched might have changed
+		buildListOfFiles
+
+		updateResults
+		printResults
+		continue
+		;;
+
+	    ## commands: ,,* through ""
+	    ,|,[^,]*)
+		echo -n "Unrecognized , command. " >&2
+		echo    "Use \",,word\" to search for \",word\"." >&2
+		continue
+		;;
+
+	    ,,*|\.\.*|\;\;*)
+		# Search for strings starting with , or . or ;
+		query=(${retangleCommand:1})
+		if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+		    timeUpdateResultsRequested=$EPOCHREALTIME
+		fi
+		updateResults
+		printResults
+		;;
+
+	    "")
+		# No input means act on first item
+		if [ "${#query[@]}" -eq 0 ]; then
+		    break
+		fi
+
+		sedString="s/^[[:digit:]]*"
+		sedString+=$'\x12'
+		sedString+="\\([^"
+		sedString+=$'\x12'
+		sedString+="]*\\)"
+		sedString+=$'\x12'
+		sedString+="\\(.*\\)$/\\1/"
+		actOnFile="$(echo "${listOfFiles[$grepElements]}" | \
+				  sed -e '/^$/d' | \
+				  sed -ne '$p' | \
+				  sed -e $sedString)"
+
+		openFileWith "$actOnFile"
+
+		# Verify behavior. It seems that this opens the file, returns
+		# from that utility, then quits immediately -- when what we
+		# want is to launch utility and quit in the background. TODO.
+		if [ -z "$stayOpenInBackground" ] \
+		|| [ ! "$stayOpenInBackground" = "yes" ]
+		then
+		    break
+		fi
+		;;
+
+	    ## commands: ;
+	    \;)
+		nameNewFile
+		flagPromptBeforeOpening=yes
+		openFileWith "$newFileName"
+
+		if [ -z "$stayOpenInBackground" ] \
+		|| [ ! "$stayOpenInBackground" = "yes" ]
+		then
+		    break
+		fi
+		;;
+
+	    ## commands: .* and ;*
+	    \.*|\;*)
+		indexReverse ${retangleCommand:1}
+		indexLookupReturn=$?
+		if [ $indexLookupReturn -eq 0 ]; then
+
+		    if [ $indexValue -le $itemCount ]; then
+			sedAddressString=$(( ${itemCount} - ${indexValue} ))
+			sedString="s/^[[:digit:]]*"
+			sedString+=$'\x12'
+			sedString+="\\([^"
+			sedString+=$'\x12'
+			sedString+="]*\\)"
+			sedString+=$'\x12'
+			sedString+="\\(.*\\)$/\\1/"
+			actOnFile="$(echo "${listOfFiles[$grepElements]}" | \
+					  sed -n ${sedAddressString}p | \
+					  sed -e $sedString)"
+
+			openFileWith "$actOnFile"
+
+			if [ -z "$stayOpenInBackground" ] \
+			|| [ ! "$stayOpenInBackground" = "yes" ]
+			then
+			    break
+			fi
+		    else
+			# Error check: index value larger than results
+			echo $warningUnrecognizedDotValue | fold -s
+		    fi
+
+		else
+		    # Error check: indexReverse did not return 0
+		    echo $warningUnrecognizedDotValue | fold -s
+		fi
+		;;
+
+	    ## commands: search queries
+	    *)
+		if [ ! -z $flagQueryOperatorBeginsCommand ]; then
+		    unset flagQueryOperatorBeginsCommand
+		else
+		    query=($retangleCommand)
+		fi
+
+		grepStringArray=()
+		if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+		    timeUpdateResultsRequested=$EPOCHREALTIME
+		fi
+		updateResults
+		printResults
+		;;
+	esac
+    done
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeMainDone=$EPOCHREALTIME
+	bcString="($timeMainDone - $timeMainBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="main() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+## parseTargetArgument() handles -t and ,t to set $target[n]
+parseTargetArgument()
+{
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeParseTargetArgumentBegan=$EPOCHREALTIME
+    fi
+
+    ## initialize parameters
+    if [ -z "$target" ]; then
+	echo "Warning: parseTargetArgument() called with no \$target set." >&2
+	return
+    fi
+    unset grepElements
+    unset grepStringArray
+    unset listOfFiles
+    unset metadataTarget
+
+    ## case pre-processing (substitute for ;;& syntax)
+    case "${target}" in
+	n|notes|Notes|notesfolder|notesFolder)
+	    target="$defaultNotesTarget"
+	    findInclude=("${findIncludeDocs[@]}")
+	    ;;
+
+	sh|shist|searchhist|searchhistory|searchHistory)
+	    target="${fileCachePath}/internetSearch/"
+	    findInclude=( "*URIlist.gz" )
+	    ;;
+
+	H|HTML|HTTP|WEB|WEBSITE|WEBPAGE)
+	    flagPromptBeforeOpening=yes
+	    ;;
+    esac
+
+    ## case "${target}"
+    case "${target}" in
+
+	d|duck|duckduckgo|DuckDuckGo*)
+	    target=DuckDuckGo
+	    preferredInternetSearchTarget=DuckDuckGo
+
+	    targetKind=internetSearch
+	    if [ ${#query[@]} -eq 0 ]; then
+		newInternetSearch
+		# Return from here because newInternetSearch will call
+		# a new instance of parseTargetArgument
+		return
+	    fi
+
+	    # URI-ify the query string. TODO: test for robustness.
+	    searchString="$(echo "${query[@]}" | sed -e 's/ /%20/g' \
+						     -e 's/!/%21/g' \
+						     -e 's/#/%23/g' \
+						     -e 's/\$/%24/g' \
+						     -e 's/&/%26/g' \
+						     -e s/$'\47'/%27/g \
+						     -e 's/(/%28/g' \
+						     -e 's/)/%29/g' \
+						     -e 's/\*/%2A/g' \
+						     -e 's/+/%2B/g' \
+						     -e 's/,/%2C/g' \
+						     -e 's=/=%2F=g' \
+						     -e 's/:/%3A/g' \
+						     -e 's/;/%3B/g' \
+						     -e 's/=/%3D/g' \
+						     -e 's/?/%3F/g' \
+						     -e 's/@/%40/g' \
+						     -e 's/\[/%5B/g' \
+						     -e 's/\]/%5D/g')"
+
+	    # Tor isn't supported, but this was easy to drop in here.
+	    if [ "${curlCommand:0:8}" = "torsocks" ]; then
+		queryURL="https://3g2upl4pq6kufc4m.onion/lite/?"
+	    else
+		queryURL="https://duckduckgo.com/lite/?"
+	    fi
+
+	    # See https://duckduckgo.com/params 
+	    queryURL+="q=${searchString}"
+	    queryURL+="&kp=-2" # Safe search: 0 default, -1 moderate, -2 off
+	    queryURL+="&kaf=1" # Full URLs: 1 on, -1 off
+	    queryURL+="&kd=-1" # Redirect: 1 on, -1 off
+	    queryURL+="&kh=1"  # HTTPS: 1 on, -1 off
+	    queryURL+="&kae=t" # Theme: t for terminal, -1 for default
+
+	    # DuckDuckGo requests that advertisements not be disabled by
+	    # programmers, but kindly provides this feature for use by
+	    # individuals. Therefore, the following line is disabled before
+	    # this script is distributed.
+	    #queryURL+="&k1=-1" # Advertisements: 1 on, -1 off
+
+	    # Get additional results by page
+	    if [ ! -z "$queryURLpage" ]; then
+		queryURL+="&s=$((30*${queryURLpage}))"
+		queryURL+="&dc=$((30*${queryURLpage}+1))"
+		queryURL+="&o=json"
+		queryURL+="&v=l"
+		queryURL+="&api=%2Fd.js"
+	    fi
+
+	    # $cacheFile defined below in ## Process internetSearch
+	    ;;
+
+	h|html|http|web|website|webpage|H|HTML|HTTP|WEB|WEBSITE|WEBPAGE)
+	    target="${query[@]}"
+	    targetKind=website
+
+	    # If not a URI, nor file, nor directory, then
+	    # prefix $target as if it were a URI
+	    if [ ! "${target:0:4}" = "http" ]; then 
+		if [ ! -r "$target" ]; then
+		    if [ ! -d "$target" ]; then
+			printf \\n
+			printRight "adding \"https://\" prefix"
+			target="https://${target}"
+		    fi
+		fi
+	    fi
+	    ;;
+
+	l|list|listOfURIs)
+	    # $target can be either:
+	    # 1. the name of a file containing a list of URIs, or
+	    # TODO 2. a string that comprises a newline-delimited list of URIs
+	    target="${query[@]}"
+	    targetKind=listOfURIs
+		cacheFile="${fileCachePath}/lists/"
+	    if [ -w "${target}" ]; then
+		cacheFile+="${target}"
+	    else
+		# This code should be dead, but in case it isn't, truncate long
+		# lists to a reasonable length.
+		cacheFile+="$(<<< "$target" cut -c 1-80)"
+	    fi
+	    ;;
+
+	Puppet*)
+	    target=Puppet
+	    targetKind=internetSearch
+	    preferredInternetSearchTarget=Puppet
+
+	    if [ ${#query[@]} -eq 0 ]; then
+		newInternetSearch
+		# Return from here because newInternetSearch will call
+		# a new instance of parseTargetArgument
+		return
+	    fi
+
+	    # URI-ify the query string. TODO: test for robustness.
+	    searchString="$(echo "${query[@]}" | sed -e 's/ /%20/g' \
+						     -e 's/!/%21/g' \
+						     -e 's/#/%23/g' \
+						     -e 's/\$/%24/g' \
+						     -e 's/&/%26/g' \
+						     -e s/$'\47'/%27/g \
+						     -e 's/(/%28/g' \
+						     -e 's/)/%29/g' \
+						     -e 's/\*/%2A/g' \
+						     -e 's/+/%2B/g' \
+						     -e 's/,/%2C/g' \
+						     -e 's=/=%2F=g' \
+						     -e 's/:/%3A/g' \
+						     -e 's/;/%3B/g' \
+						     -e 's/=/%3D/g' \
+						     -e 's/?/%3F/g' \
+						     -e 's/@/%40/g' \
+						     -e 's/\[/%5B/g' \
+						     -e 's/\]/%5D/g')"
+
+	    queryURL="https://puppet.com/search/docs?keys=${searchString}"
+
+	    if [ ! -z "$queryURLpage" ]; then
+		queryURL+="&page=${queryURLpage}"
+	    fi
+	    ;;
+
+	r|rl|read|readinglist|readingList)
+	    target="$readingList"
+	    targetKind=listOfURIs
+	    cacheFile="${fileCachePath}"
+	    cacheFile+="${target}.gz"
+	    metadataTarget="$readingList"
+	    ;;
+
+	w|wp|wiki|wikipedia|Wikipedia)
+	    # TODO
+	    target=Wikipedia
+	    targetKind=internetSearch
+	    preferredInternetSearchTarget=Wikipedia
+	    ;;
+
+	*)
+	    # All other target arguments
+	    target="$(echo "${target}" | sed s=~=$HOME=)"
+
+	    # If previous search was an internet search,
+	    # add previous query to current query.
+	    if [ ! -z "$metadataQuery" ]; then
+		query=( $metadataQuery ${query[@]} )
+	    fi
+
+	    cacheFile="${fileCachePath}"
+	    cacheFile+="${target}"
+
+	    # Target is a directory
+	    if [ -d "${target}" ]; then
+		targetKind=localFolder
+		cacheFile+="/re-tangle.gz"
+
+	    # Target is a file
+	    elif [ -r "${target}" ]; then
+		targetKind=localFile
+		cacheFile+=".re-tangle.gz"
+
+	    else
+		echo "Unrecognized target: $target" >&2
+	    fi
+
+	    if [ ${#findInclude[@]} -eq 0 ]; then
+		findInclude=("${findIncludeDocs[@]}")
+	    fi
+	    ;;
+    esac
+
+    # Used by some functions to determine earlier search target,
+    # so keep in memory until now rather than unsetting with others.
+    unset metadataQuery
+
+    ## Process internetSearch
+    if [ "${targetKind}" = "internetSearch" ]; then
+	# processInternetSearch(), in addition to downloading search results,
+	# 1. generates $fileResults
+	# 2. changes $target to equal $listOfURIs, and
+	# 3. changes $targetKind to listOfURIs, so the below section is used.
+	processInternetSearch
+
+	cacheFile="${fileCachePath}"
+	cacheFile+="$fileResults"
+    fi
+
+    case "${targetKind}" in
+	listOfURIs)
+	    ## Process listOfURIs
+
+	    # Set metadataTarget and metadataQuery if we're looking at
+	    # cached search history
+	    if [ -r "${target}" ]; then
+
+		# Verifying that we're reading cached search history:
+
+		# For relative directories, build root path
+		if [ ! "${target:0:1}" = "/" ]; then
+		    test1="$(pwd)"
+		    test1+="/"
+		    test1+="${target}"
+
+		else
+		    test1="${target}"
+		fi
+
+		# Then compare this path to the cachefile path
+
+		# PWD-based path plus "/internetSearch"
+		test1="${test1:0:$(( ${#fileCachePath} + 15 ))}"
+
+		# Cachefile path
+		test2="${fileCachePath}/internetSearch"
+
+		if [ "$test1" = "$test2" ]; then
+		    # They match, so we're reading cached search history
+		    targetBasename="$(basename "$target")"
+		    metadataTarget="$(echo "$targetBasename" | sed \
+		-e 's/^[[:digit:]]\{14\} \(.*\) - \(.*\)\.URIlist.gz$/\1/')"
+		    metadataQuery="$(echo "$targetBasename" | sed \
+		-e 's/^[[:digit:]]\{14\} \(.*\) - \(.*\)\.URIlist.gz$/\2/')"
+
+		fi
+	    fi
+
+	    buildListOfFiles
+
+	    if [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]; then
+		if [ -w "$historyFile" ] || [ -w "$fileUserPath" ]; then
+		    echo "${query[@]}" >> "$historyFile"
+		fi
+	    fi
+
+	    unset query
+	    updateResults
+	    printResults
+	    ;;
+
+	localFolder)
+	    ## Process localFolder
+	    buildListOfFiles
+
+	    if [ "$firstRun" = "yes" ]; then
+
+		# Either there is no query...
+		if [ ${#query[@]} -eq 0 ]; then
+		    # TODO use a variable for the message
+		    echo "Enter search terms. \`,h' displays help and \`,q' quits."
+
+		# ...or that query might need to be logged.
+		elif [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]; then
+		    if [ -w "$historyFile" ] || [ -w "$fileUserPath" ]; then
+			echo "${query[@]}" >> "$historyFile"
+		    fi
+		fi
+	    fi
+
+	    # Handle local folder search when search terms are derived from an
+	    # earlier internet search.
+	    if [ "${#query[@]}" -ne 0 ]; then
+		# add queryinfo based on listOfFiles header
+		updateResults
+		printResults
+	    fi
+	    ;;
+
+	localFile)
+	    ## Process localFile
+	    flagPromptBeforeOpening=yes
+	    openFileWith "${target}"
+	    ;;
+
+	website)
+	    ## Process website
+
+	    # If a website is targeted on first run, then it has been
+	    # explicitly called from the command line. So, we assume that
+	    # this is all they're interested in.
+	    if [ "$firstRun" = "yes" ]; then
+		# Print new line to avoid overwriting the command line
+		printf \\n
+		# Quit after launch
+		unset stayOpenInBackground
+	    fi
+
+	    openFileWith "${target}"
+	    ;;
+    esac
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeParseTargetArgumentDone=$EPOCHREALTIME
+	bcString="($timeParseTargetArgumentDone - $timeParseTargetArgumentBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="parseTargetArgument() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+## printResults() prints the last listOfFiles[] to terminal or a pipeline
+printResults()
+{
+    ## If writing to a terminal (fd 1), use a pretty format; otherwise, assume
+    # in a pipe and send only newline- or null-delimited filenames.
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timePrintResultsBegan=$EPOCHREALTIME
+    fi
+
+    ## Initialize
+    unset firstRun
+
+    ## Terminal output
+    if [ -t 1 ]; then
+
+	# The "pretty format" includes three elements:
+	#   - resultIndex -- the index value, e.g., ".a"
+	#   - resultItems -- the item name, e.g. "file.txt"
+	#   - resultPreview -- details about the item
+	# Each item includes formatting.
+	
+	## Say goodbye to the shuffling bear
+	if [ ! -z "$waitingPID" ]; then
+	    kill $waitingPID
+	    unset waitingPID
+	fi
+
+	## Clear the line
+	tput cub $(tput cols)
+	tput el
+
+	## Set $resultItems
+	case "${targetKind}" in
+
+	    localFolder)
+		# Use a contracted folder name
+		sedStringLocalFolder="s/^[[:digit:]]*"
+		sedStringLocalFolder+=$'\x12'
+		# File name: \1
+		sedStringLocalFolder+="\\([^"
+		sedStringLocalFolder+=$'\x12'
+		sedStringLocalFolder+="]*\\)"
+		sedStringLocalFolder+=$'\x12'
+		# File contents: \2
+		sedStringLocalFolder+="\\(.*\\)$"
+
+		sedString=${sedStringLocalFolder}
+		sedString+="/${formatResult}\\1${normal}/p"
+		resultItems="$(echo "${listOfFiles[$grepElements]}" | \
+		    sed -n -e "s=${target}/==" \
+		    -e "s=$HOME=~=" \
+		    -e $sedString)"
+		;;
+
+	    listOfURIs)
+		sedStringListOfURIs="s/^[[:digit:]]*"
+		sedStringListOfURIs+=$'\x12'
+		# Scheme: \1
+		sedStringListOfURIs+="\\([^:]*:\\/*\\)"
+		# Authority, loosely: \2
+		sedStringListOfURIs+="\\([^/]*\\)"
+		# Dirname: \3
+		sedStringListOfURIs+="\\([^"
+		sedStringListOfURIs+=$'\x12'
+		sedStringListOfURIs+="]*\\/\\)"
+		# Basename with query and fragments: \4
+		sedStringListOfURIs+="\\([^"
+		sedStringListOfURIs+=$'\x12'
+		sedStringListOfURIs+="]*\\)"
+		sedStringListOfURIs+=$'\x12'
+		# Rendered preview: \5
+		sedStringListOfURIs+="\\(.*\\)$"
+
+		# Replacement
+		sedString=${sedStringListOfURIs}
+		sedString+="/${formatPreview}\\1${normal}"
+		sedString+="${formatResult}\\2${normal}/"
+		# The cut line avoids excess processing, but previews of
+		# URIs longer than the cut length will break.
+		# The tr line seems to solve an unknown issue on Linux.
+		resultItems="$(printf %s\\n "${listOfFiles[$grepElements]}" | \
+		    cut -c 1-1024 | \
+		    tr -cd '[:print:]\n'$'\x12' | \
+		    sed $sedString)"
+		;;
+
+	esac
+
+	## Back out if no resultItems are found
+	if [ -z "$resultItems" ]; then
+	    echo "No results found. \",all\" will remove the query filter, \",kind\" will change which filetypes are included, \",target\" will change the search target, and \"enter\" or \";\" will name a new file." | fold -s
+	    itemCount=0
+	    return 0
+	fi
+
+	## Set $resultPreview and $pasteDelimiter
+	case "${targetKind}" in
+
+	    localFolder)
+		sedString=${sedStringLocalFolder}
+		sedString+="/${formatPreview}\\2/p"
+		resultPreview="$(echo "${listOfFiles[$grepElements]}" | \
+		    sed -n -e $sedString)"
+
+		pasteDelimiter=" "
+		;;
+
+	    listOfURIs)
+		# Replacement
+		sedString=${sedStringListOfURIs}
+		sedString+="/${formatPreview}\\3\\4${normal}"
+
+		# Present rendered results
+		sedStringRendered="\\5"
+
+		# This gets ugly because Bash wants to word-split around the
+		# white space. Insert a ' '-quoted space between two variables.
+		resultPreview="$(printf %s\\n "${listOfFiles[$grepElements]}" | \
+		    cut -c 1-1024 | \
+		    tr -cd '[:print:]\n'$'\x12' | \
+		    sed ${sedString}' '${sedStringRendered}/)"
+
+		# NB: Paste sees \0 as an empty string, not a null char
+		pasteDelimiter=' \0'
+		;;
+	esac
+
+	## Set $itemCount, call buildIndex(), and set $resultIndex
+	itemCount="$(echo "$resultItems" | wc -l | bc)"
+
+	buildIndex $itemCount
+	resultIndex="$(echo "${index[@]}" | rev | \
+	    tr ' ' '\n' | \
+	    rev | \
+	    tail -n $itemCount | \
+	    sed -e s/^\\\(.*\\\)$/${formatIndex}\.\\\1${normal}/)"
+
+	## Sum firstLineLength
+
+	# Adding all of the formatting parameters inserted above works when
+	# the index, result, and preview all start on the first line; other
+	# conditions are handled below.
+
+	case "${targetKind}" in
+
+	    localFolder)
+		firstLineLength=$(( $(tput cols) + \
+			      ${#formatIndex} + ${#normal} + \
+			      ${#formatResult} + ${#normal} + \
+			      ${#formatPreview}))
+		;;
+
+	    listOfURIs)
+		firstLineLength=$(( $(tput cols) + \
+			${#formatIndex} + ${#normal} + \
+			${#formatPreview} + ${#normal} + \
+			${#formatResult} + ${#normal} + \
+			${#formatPreview} + ${#normal} ))
+		;;
+
+	esac
+
+	## Combine the results
+	resultLines="$(paste -d "$pasteDelimiter" \
+	      <(echo "$resultIndex") \
+	      <(echo "$resultItems") \
+	      <(echo "$resultPreview"))"
+
+	## Print results
+
+	# Subsequent lines for each item are indented x spaces
+	subsequentLineIndent="    "
+	subsequentLineLength=$(( $(tput cols) - ${#subsequentLineIndent} ))
+
+	# For each result item (stdin at end of for loop)
+	for ((count=1; count <= $itemCount; count++)); do
+	    read thisItem
+
+	    # Initialize line length
+	    thisItemOffset=$firstLineLength
+
+	    # Divide result item into printed lines
+	    for ((countLines=1; countLines <= $resultMaxLines; countLines++)); do
+
+		# First line for this item
+		if [ $countLines -eq 1 ]; then
+		    # If $thisItem is less than $firstLineLength, just print
+		    if [ ${#thisItem} -le $firstLineLength ]; then
+			printf %s\\n "$thisItem"
+			break
+			
+		    # If the first line is the full width and it does not
+		    # include two spaces, then the second ${normal} has not
+		    # yet printed
+		    else
+			tryFirstLine="${thisItem:0:$firstLineLength}"
+
+			# Use arithmetic to clear wc's whitespace
+			trySpaces=$(( 0 + "$(<<< "$tryFirstLine" \
+					   tr -cd ' ' | wc -c)"))
+			
+			if [ $trySpaces -lt 2 ]; then
+			    thisItemOffset=$(( $firstLineLength - ${#normal} ))
+			fi
+
+			printf %s\\n "${thisItem:0:$thisItemOffset}"
+		    fi
+
+		# Subsequent line(s) for this item
+		else
+		    # Print next line, starting at last unprinted char
+		    if [ ${#thisItem} -gt ${thisItemOffset} ]; then
+			printf %s\\n "    ${thisItem:\
+					  $thisItemOffset:\
+					  $subsequentLineLength}"
+
+			# Update counter to start next line correctly
+			thisItemOffset=$(( $thisItemOffset + \
+						$subsequentLineLength ))
+
+		    # If no remaining text
+		    else
+			break
+		    fi
+
+		fi
+	    done
+	done <<< "$resultLines"
+
+	# Insurance cleanup
+	echo -n $normal
+
+    ## Pipe output
+    else
+
+	sedString='s/^[[:digit:]]*[[:cntrl:]]'
+	sedString+='\([^[:cntrl:]]*\)'
+	sedString+='[[:cntrl:]].*$'
+	sedString+='/\1/g'
+
+	if [ "$flagPrintNullDelimiter" = "yes" ]; then
+	    echo "${listOfFiles[$grepElements]}" | \
+		sed -e "$sedString" -e '/^$/d' | tr '\n' '\0'
+
+	else
+	    echo "${listOfFiles[$grepElements]}" | \
+		sed -e "$sedString" -e '/^$/d'
+
+	fi
+	exit
+    fi
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timePrintResultsDone=$EPOCHREALTIME
+	bcString="($timePrintResultsDone - $timePrintResultsBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="printResults() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	profileMsg "$message"
+    fi
+}
+
+## updateResults() parses search terms and filters listOfFiles[]
+updateResults()
+{
+    # updateResults() takes a list of files at $listOfFiles[n] and filters it
+    # with Grep, where each successive iteration is stored as another list in
+    # $listOfFiles[n+1]. The Grep filters are stored in $grepStringArray[n]
+    # where n is aligned between listOfFiles[] and grepStringArray[]. This
+    # function uses grepElements to track the sequence of filters to apply,
+    # so that the ultimate results are stored in listOfFiles[$grepElements]
+
+    ## TODO: add handling for:
+    # - (parenthetical grouping) to change the order of operations (see below)
+    # - META to search only metadata, e.g. file name, path, search engine, query
+    #   terms
+
+    # Nested parentheses:
+    # a AND (b AND c) is the same as a b c
+    # a OR (b OR c) is the same as a OR b OR c
+    # a AND (b OR c) is the same as a b OR c
+    # a OR (b AND c) is the same as a OR b a OR c
+    # a OR (b AND c OR d) is the same as a OR b a OR c OR d
+    # a OR (b OR c AND d) is the same as a OR b OR c a OR d
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeUpdateResultsBegan=$EPOCHREALTIME
+    fi
+
+    ## Initialize
+
+    # Start $grepElements at first content element of listOfFiles.
+    # Then, listOfFiles[n] and grepStringArray[n] are aligned by
+    # using grepElements as n.
+    grepElements=${listOfFiles[0]}
+
+    ## See if there's a query to process
+    if [ "${#query[@]}" -eq 0 ]; then
+	return
+    fi
+
+    ## Build the ${grepStringArray[]}, which will provide arguments to Grep.
+
+    # Set interim parameters:
+    # $grepInvert will be "-v" for NOT and NOR.
+    # $goBackToStringStartingWith will add on to an existing "-e" or "-v".
+    # Strip syntax (+, -, |) from $parameters[$countArg] if necessary.
+    # $grepPrefix and $grepPostfix allow particular control over how each
+    #    Grep command is constructed; these are associated with BEFORE, AFTER,
+    #    and NEAR.
+
+    ## Parse each element of query[] to build grepStringArray[]
+    for ((countArg=0; countArg < ${#query[@]}; countArg++)); do
+
+	# Init variables.
+	unset goBackToStringStartingWith
+	unset grepInvert
+	unset grepPostfix
+	unset grepPrefix
+	unset digitsToCount
+
+	## case pre-processing (a substitute for ;;& syntax)
+	case "${query[$countArg]}" in
+	    NEAR)
+		digitsToCount=$defaultCountForNear
+		;;
+	esac
+
+	## case {1/2} AND OR NOT NOR
+	case "${query[$countArg]}" in
+	    AND)
+		((countArg++))
+		;;
+
+	    OR)
+		((countArg++))
+		goBackToStringStartingWith="-e"
+		;;
+
+	    NOT)
+		((countArg++))
+		# The extra space is used at the end of this for loop.
+		grepInvert="-v "
+		;;
+
+	    NOR)
+		((countArg++))
+		# The extra space might be used at the end of this for loop.
+		goBackToStringStartingWith="-v "
+		;;
+
+	    \|*)
+		query[$countArg]="${query[$countArg]:1}"
+		goBackToStringStartingWith="-e"
+		;;
+
+	    -*)
+		query[$countArg]="${query[$countArg]:1}"
+		# The extra space is used at the end of this for loop.
+		grepInvert="-v "
+		;;
+
+	    +*)
+		query[$countArg]="${query[$countArg]:1}"
+		;;
+
+	    ## case {2/2} BEFORE AFTER NEAR
+	    BEFORE)
+		((countArg++))
+		goBackToStringStartingWith="--"
+		grepPostfix=".*"
+		;;
+
+	    BEFORE[[:digit:]]*)
+		digitsToCount="$(echo "${query[$countArg]}" | sed \
+	       -e 's/^.*BEFORE\([[:digit:]]*\).*$/\1/')"
+		((countArg++))
+		goBackToStringStartingWith="--"
+		grepPostfix="\\([^[:blank:]]*[[:blank:]][^[:blank:]]*\\)"
+		grepPostFix+="\\{0,$digitsToCount\\}"
+		;;
+
+	    AFTER)
+		((countArg++))
+		goBackToStringStartingWith="--"
+		grepPrefix=".*"
+		;;
+
+	    AFTER[[:digit:]]*)
+		digitsToCount="$(echo "${query[$countArg]}" | sed \
+				       's/^.*AFTER\([[:digit:]]*\).*$/\1/')"
+		((countArg++))
+		goBackToStringStartingWith="--"
+		grepPrefix="\\\([^[:blank:]]*[[:blank:]][^[:blank:]]*\\\)"
+		grepPrefix+="\\\{0,$digitsToCount\\\}"
+		;;
+
+	    NEAR|NEAR[[:digit:]]*)
+		if [ -z $digitsToCount ]; then
+		    digitsToCount="$(echo "${query[$countArg]}" | sed \
+					   's/^.*NEAR\([[:digit:]]*\).*$/\1/')"
+		fi
+
+		((countArg++))
+		goBackToStringStartingWith="--"
+		grepPrefix="\\\([^[:blank:]]*[[:blank:]][^[:blank:]]*\\\)"
+		grepPrefix+="\\\{0,$digitsToCount\\\}"
+		grepPostfix="\\([^[:blank:]]*[[:blank:]][^[:blank:]]*\\)"
+		grepPostfix+="\\{0,$digitsToCount\\}"
+		;;
+
+	esac
+
+	## Set up "quoted strings"
+
+	if [ "${query[$countArg]:0:1}" = '"' ]; then
+
+	    interimParameter="${query[$countArg]:1}"
+
+	    until [ "${query[$countArg]: -1}" = '"' ]; do
+		((countArg++))
+		interimParameter+="[[:blank:]]\{1,\}${query[$countArg]}"
+	    done
+
+	    query[$countArg]="${interimParameter:0:$(( ${#interimParameter} - 1 ))}"
+	fi
+
+	## Find the right values for $grepElements and $grepInvert
+
+	if [ -z "$goBackToStringStartingWith" ]; then
+
+	    # Most iterations should start with a blank entry...
+	    until [ -z "${grepStringArray[$grepElements]}" ]; do
+		((grepElements++))
+	    done
+
+	else
+	    # ...while others (OR, NOR) want to modify a previous entry.
+	    testOne="${grepStringArray[$grepElements]:0:2}"
+	    testTwo="${goBackToStringStartingWith:0:2}"
+	    until [ $grepElements = ${listOfFiles[0]} ] \
+	    || [ "$testOne" =  "testTwo" ] \
+	    || [ ! -z "$grepPostfix" ] \
+	    || [ ! -z "$grepPrefix" ]
+	    do
+		((grepElements--))
+	    done
+
+	    # If an OR|NOR is called but no previous AND|NOT is found,
+	    # treat the OR|NOR as an independent AND|NOT: go forward
+	    # along the string of grepElements until an empty
+	    # grepStringArray[] is found.
+
+	    # Update test strings
+	    testOne="${grepStringArray[$grepElements]:0:2}"
+	    testTwo="${goBackToStringStartingWith:0:2}"
+
+	    # If NOR, then...
+	    if [ $grepElements = ${listOfFiles[0]} ] \
+	    && [ -z "${grepStringArray[$grepElements]}" ] \
+	    && [ "$goBackToStringStartingWith" = "-v " ]
+	    then
+		grepInvert="$goBackToStringStartingWith"
+
+	    # Else, if OR... 
+	    elif [ -z "$grepPrefix" ] \
+	    && [ -z "$grepPostfix" ] \
+	    && [ "$testOne" != "$testTwo" ]
+	    then
+		until [ -z "${grepStringArray[$grepElements]}" ]; do
+		    ((grepElements++))
+		done
+
+		# If NOR (again)...
+		if [ "$goBackToStringStartingWith" = "-v " ]; then
+		    grepInvert="$goBackToStringStartingWith"
+		fi
+	    fi
+	fi
+
+	## Set the queries
+
+	# \1 is an optional -v (negation for NOT/NOR)
+	sedStringGrepString="s/^\(-v \)\{0,1\}"
+	# \2 is any number of -e commands, except the last
+	sedStringGrepString+="\(-e .* \)*"
+	# \3 is the last -e, \4 is the last command
+	sedStringGrepString+="\(-e \)\(.*\)[[:blank:]]*$"
+
+	# Extra space at the end of these strings allows additional entries to
+	# be added.
+	if [ -z "$grepPostfix" ] && [ -z "$grepPrefix" ]; then
+	    grepStringArray[$grepElements]+="${grepInvert}-e ${query[$countArg]} "
+
+	elif [ -z "$grepPostfix" ]; then #implied that $grepPrefix exists
+	    # Replacement: prefix before last command
+	    sedString="${sedStringGrepString}"
+	    sedString+="/\1\2\3${query[$countArg]}${grepPrefix}\4/"
+
+	    grepStringArray[$grepElements]="$(\
+		echo "${grepStringArray[$grepElements]}" | \
+		sed "$sedString") "
+
+	elif [ -z "$grepPrefix" ]; then #implied that $grepPostfix exists
+	    # Add postfix after last command, but before query element.
+	    # The last command needs its last character (a space) removed.
+	    grepStringArray[$grepElements]="$(cat \
+		<(echo -n "${grepStringArray[$grepElements]:0:-1}") \
+		<(echo -n "$grepPostfix") \
+		<(echo -n "${query[$countArg]}")) "
+
+	else #implied that both $grepPrefix and $grepPostfix exist
+	    # Both add prefix before last command and
+	    # add postfix after last command but before query element.
+	    backRefOne="$(echo "${grepStringArray[$grepElements]}" | \
+		sed "${sedStringGrepString}/\1/")"
+	    backRefTwo="$(echo "${grepStringArray[$grepElements]}" | \
+		sed "${sedStringGrepString}/\2/")"
+	    backRefThree="$(echo "${grepStringArray[$grepElements]}" | \
+		sed "${sedStringGrepString}/\3/")"
+	    backRefFour="$(echo "${grepStringArray[$grepElements]}" | \
+		sed "${sedStringGrepString}/\4/")"
+
+	    grepStringArray[$grepElements]="$(cat \
+		<(echo -n "$backRefOne") \
+		<(echo -n "$backRefTwo") \
+		<(echo -n "$backRefThree") \
+		<(echo -n "${query[$countArg]}${grepPrefix}") \
+		<(echo -n "$backRefFour") \
+		<(echo -n "${grepStringArray[$grepElements]:0:-1}") \
+		<(echo -n "$grepPostfix") \
+		<(echo -n "${query[$countArg]}")) "
+	fi
+
+	unset sedStringGrepString
+    done
+
+    ## Use ${grepStringArray[]} to issue Grep commands against ${listOfFiles[]}
+    for ((grepElements=${listOfFiles[0]}; \
+	  grepElements < $(( ${listOfFiles[0]} + ${#grepStringArray[@]} )); \
+	  grepElements++)); do
+
+	# All searches start from the contents of the last results.
+	interimList="$(echo "${listOfFiles[$grepElements]}" | \
+	    grep -a $grepIgnoreCase ${grepStringArray[$grepElements]})"
+
+	# Sort, uniq-ify, and store the filtered results in
+	# listOfFiles[n+1]
+	listOfFiles[$(( $grepElements + 1 ))]="$(echo "$interimList" | \
+						      sort | uniq)"
+    done
+
+    # After the above loop has closed, grepElements will have a value one
+    # increment larger than the index of the last grepStringArray element,
+    # meaning that listOfFiles[$grepElements] points to the final search
+    # result; the final "$grepElements++" is handled by the for loop.
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeUpdateResultsDone=$EPOCHREALTIME
+	bcString="($timeUpdateResultsDone - $timeUpdateResultsBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="updateResults() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+### Minor Functions
+##  actOnFileMsg() prints right-aligned text to the previous line
+actOnFileMsg()
+{
+    # Takes $actOnFile as input, prints text, returns nothing meaningful.
+    # If $displayName is set, will use that as input instead.
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeActOnFileMsgBegan=$EPOCHREALTIME
+    fi
+
+    ## Test $displayname, set from $htmlNameFiltered or $actOnFile
+    if [ "${#displayName}" -eq 0 ]; then
+	case "${targetKind}" in
+	    listOfURIs)
+		sedString="s=^.*[[:digit:]]\{14\}[[:blank:]]\{1,\}"
+		sedString+="[[:alnum:]]\{4,5\}[[:blank:]]\{1,\}"
+		sedString+="\([^[:blank:]]*\) .*$=\1="
+		displayName="$(echo "$htmlNameFiltered" | \
+				sed -e "$sedString")"
+		;;
+	esac
+    fi
+
+    if [ -z "$displayName" ]; then
+	displayName="$actOnFile"
+    fi
+
+    actOnFileMessage="selected $displayName"
+
+    ## Set $maxLength and shorten $actOnFileMessage as needed
+    maxLength=$(( $(tput cols) - ${#prompt} - 10 ))
+
+    if [ ${#actOnFileShortcut} -eq 0 ]; then
+	actOnFileShortcut="$target"
+    fi
+
+    while [ ${#actOnFileMessage} -gt $maxLength ]; do
+	actOnFileMessage="selected "
+
+	case ${actOnFileMsgCount:=1} in
+	    1)
+		actOnFileMessage+="$(echo "$displayName" | \
+					  sed s=$HOME=~=)"
+		;;
+
+	    2)
+		actOnFileMessage+="$(echo "$displayName" | \
+					  sed s=${actOnFileShortcut}/==)"
+		;;
+
+	    3)
+		actOnFileMessage="$(echo "$displayName" | \
+					 sed s=${actOnFileShortcut}/==)"
+		;;
+
+	    *)
+		actOnFileMessage="$(echo "$displayName" | \
+					 sed s=${actOnFileShortcut}/== | \
+					 cut -c 1-$(( $maxLength - 3 )) )"
+		actOnFileMessage+="..."
+		;;
+	esac
+
+	((actOnFileMsgCount++))
+    done
+
+    ## Print and clean up
+    printRight "$actOnFileMessage"
+
+    unset displayName
+    unset actOnFileShortcut
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeActOnFileMsgDone=$EPOCHREALTIME
+	bcString="($timeActOnFileMsgDone - $timeActOnFileMsgBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="actOnFileMsg() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  buildIndex() creates a numberline from arbitrary characters
+buildIndex()
+{
+    # Accepts a number of index values to create as #1, and
+    # returns index[] with at least that number elements
+    # based on the values in indexCharacters[]
+    
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeBuildIndexBegan=$EPOCHREALTIME
+    fi
+
+    # Test and initialize
+    if [ "${#indexCharacters[@]}" -lt "2" ]; then
+	echo -e "At least two index characters are required. Perhaps add:" >&2
+	echo -e "\tindexCharacters=( a s d f j k l )" >&2
+	echo -e "to the re-load config file located at:" >&2
+	echo -e "\t${fileUserPath}/config" >&2
+	echo -e "Since the defaults have been changed to something I can't use: quitting." >&2
+	exit 1
+    fi
+
+    # Key values are established: $countMinimum, which will be the lower bound
+    # for our index size, and $countTotal, which indicates which index item
+    # is currently being generated. $countMinimum should be provided to this
+    # function as $1, but a sane default is otherwise set.
+    countMinimum=${1:-25}
+
+    if [ -z "$buildIndexSkipCountCheck" ]; then
+	if [ ${#index[@]} -ge $countMinimum ]; then
+	    # An index already exists and is large enough to handle this request.
+	    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+		timeBuildIndexDone=$EPOCHREALTIME
+	    fi
+	    return 0
+	fi
+    else
+	unset buildIndexSkipCountCheck
+    fi
+
+    # TODO: find cause of problems with expanding existing index.
+    # For now, build from scratch each time
+    unset index
+    countTotal=0
+    # countTotal=${#index[@]}
+
+    # Parent: one loop for each value until enough values have been generated
+    while [ $countTotal -lt $countMinimum ]; do
+
+	# indexSkip is a mask that represents the values already generated.
+	indexSkip=0
+
+	# indexExponent indicates which place is being generated with a 0-index
+	# ("place" as in "decimal place").
+	indexExponent=0
+
+	# Child: one loop for each place needed.
+	while [ $countTotal -ge $indexSkip ]; do
+	    # Tracing numbers through this is probably the easiest way to
+	    # understand it.
+
+	    # With initial values and 7 index characters,
+	    # (0-0)/(7^0)%7=0, so index[0]=indexCharacters[0]${index[0]},
+	    # so index[0] is assigned the first index character
+	    # followed by an empty string because index[$countTotal] is
+	    # being defined but hasn't been defined yet.
+
+	    # indexExponent is then =1 and indexSkip= (0+7^1) =7
+	    # The child loop then breaks because 0 < 7.
+	    # The parent loop then re-initializes the values and returns to
+	    # the child loop until all index characters are exhausted. Then,
+
+	    # At countTotal=8,
+	    # (8-0)/(7^0)%7=0, which assigns index[8] the same value as
+	    # index[0], but the child loop continues because 8 >= 7.
+	    # Now, with indexExponent = 1 and indexSkip = 7,
+	    # (8-7)/(7^1)%7=0
+	    # but since index[8] was defined in the first loop, it is not now
+	    # meaningless to append index[8] to the definition of index[8].
+	    # Instead, this once-empty string now changes with every new value.
+
+	    # At countTotal=50 (${#indexCharacters[@]} ** 2), the child loop
+	    # continues for a third iteration, creating a third character for
+	    # each index value. This continues for as many index values as
+	    # requested, with the first value iterating at every
+	    # ${#indexCharacters[@]} ** $indexExponent, followed by
+	    # ** $indexExponent-- until all values have been represented.
+
+	    # Note that this system does not recognize "zero" as a null value.
+	    # If indexCharacters=( 0 1 2 3 4 5 6 7 8 9 ), the values 10-19
+	    # will be represented as 00-09 because it sees 00 as disinct from
+	    # 0 and 000. To use a familiar count, it would be easier to
+	    # print results into an array and use actual index values instead
+	    # of these $index[] values.
+	    indexNextDigit=$((
+				$((
+				     ${countTotal}
+				     -
+				     ${indexSkip}
+				 ))
+				/
+				$((
+				     ${#indexCharacters[@]}
+				     **
+				     ${indexExponent}
+				 ))
+				%
+				${#indexCharacters[@]}
+			    ))
+
+	    index[$countTotal]=${indexCharacters[${indexNextDigit}]}${index[$countTotal]}
+	    ((indexExponent++))
+	    indexSkip=$((${indexSkip}+${#indexCharacters[@]}**${indexExponent}))
+	done
+
+	((countTotal++))
+    done
+
+    # Wrap up -- this is used by the reverse lookup function.
+    indexMaximumValue=$countTotal
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeBuildIndexDone=$EPOCHREALTIME
+	bcString="($timeBuildIndexDone - $timeBuildIndexBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="buildIndex() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  cacheAndFilterHTML() downloads and filters a HTML page
+#   See processInternetSearch() for search engine queries
+cacheAndFilterHTML()
+{
+    # Expects $actOnFile to be a HTTP or HTTPS URI.
+
+    # Return if cache files are not being used
+    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	:
+    else
+	return
+    fi
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeCacheAndFilterHTMLBegan=$EPOCHREALTIME
+    fi
+
+    ## Retrieve and cache original HTML
+    usesCurl
+
+    # If output is to a terminal (not a pipeline), provide status update.
+    if [ -t 1 ]; then
+	# Except when curlSilent has been set
+	if [ -z "$curlSilent" ]; then
+	    echo -n "Query sent. Response: " >&2
+	fi
+    fi
+
+    # Escape parentheses and bangs.
+    actOnFile="$(echo "$actOnFile" | sed 's/\([()]\)/\\\1/g')"
+
+    # gunzip is used here in case curl sends a user agent that allows for
+    # compressed results. The -f flag should avoid any problems with cleartext.
+    HTML="$(eval $curlCommand $curlSilent "$actOnFile" | gunzip -qf)"
+
+    unset curlSilent
+
+    # Cache original $HTML
+
+    if [ ! -d "${fileCachePath}/webpages" ]; then
+	mkdir -p "${fileCachePath}/webpages"
+    fi
+
+    htmlNameBase="$(date "+%Y%m%d%H%M%S") "
+    htmlNameBase+="$actOnFile"
+
+    # Remove slashes, colons, and question marks from URI
+    htmlNameBase="$(echo "$htmlNameBase" | tr '/:?' ' ')"
+    htmlNameBase="${fileCachePath}/webpages/${htmlNameBase}"
+
+    htmlNameOriginal="${htmlNameBase}.original.html.gz"
+    echo "$HTML" | gzip -1q > "${htmlNameOriginal}"
+
+    ## Apply filters to $HTML
+
+    # Insert newlines after each tag closure
+    HTML="$(echo "$HTML" | sed -e s/\>\</\>\
+\</g)" # <-- literal newline. Do not indent.
+
+    if [ -d "${fileUserPath}/filters" ]; then
+	# List file names without paths of the filters
+	listOfURIFilters=($(find "${fileUserPath}/filters" \
+				 -maxdepth 1 \
+				 \( -type l -or -type f \) \
+				 \! \( -name "*~" \
+				 -or -name "autocensor" \
+				 -or -name "brightlist" \) | \
+				xargs basename))
+
+	# For each filter...
+	for ((count=0; count < ${#listOfURIFilters[@]}; count++)); do
+
+	    # Apply its name as a regexp against the selected URI
+	    if [ -n "$(echo "$actOnFile" | sed -n -e \
+			"/${listOfURIFilters[$count]}/p")" ]; then
+
+		# If it matches, apply the contents of that file
+		HTML="$(echo "$HTML" | sed -f \
+		    "${fileUserPath}/filters/${listOfURIFilters[$count]}")"
+	    fi
+	done
+    fi
+
+    ##  Make all HREFs absolute
+    # Start by building the URI components from base (absolute) URI
+    # (Attempting to follow RFC 3986 from 2005)
+
+    # scheme:hierarchy
+    sedString="\([^:]\{1,\}\):\(.*\)$"
+    actOnFileScheme="$(echo "$actOnFile" | sed -e "s/${sedString}/\1/")"
+    actOnFileHierarchy="$(echo "$actOnFile" | sed -e "s/${sedString}/\2/")"
+
+    # With most URIs, hierarchy is indicated with //, then
+    # authority /pa/th/ basename [$query] [#fragment]
+    # (RFC 3986: "path" should include "basename", and
+    # "basename" should exclude "query" and "fragment")
+    sedString="^//\([^/]\{1,\}\)\(.*/\)\([^/]*\)$"
+    actOnFileAuthority="$(echo "$actOnFileHierarchy" | \
+			       sed -n -e "s=${sedString}=\1=p")"
+    actOnFilePath="$(echo "$actOnFileHierarchy" | \
+			   sed -n -e "s=${sedString}=\2=p")"
+    #actOnFileBasename="$(echo "$actOnFileHierarchy" | sed -n -e "s=${sedString}=\3=p")"
+
+    # Separate query and fragment, if present, from basename
+    #sedString="^[^?]*?\([^#]*\)\(#.*\)*$"
+    #actOnFileQuery="$(echo "$actOnFileBasename" | sed -n -e "s=${sedString}=\1=p")"
+    #sedString="^[^#]*#\(.*\)$"
+    #actOnFileFragment="$(echo "$actOnFileBasename" | sed -n -e "s=${sedString}=\1=p")"
+    #sedString="^\([^?#]*\).*$"
+    #actOnFileBasename="$(echo "$actOnFileBasename" | sed -e "s=${sedString}=\1=")"
+
+    # Next, work from least significant to most significant link components
+
+    # Absolute path within same authority:
+    # starting with a slash followed by any non-slash character
+    sedStringAbsPath="\(href\=\"\{0,1\}\)\(/[^/][^\"]*\"\{0,1\}\)"
+    sedReplacementAbsPath="\1${actOnFileScheme}://${actOnFileAuthority}\2"
+
+    # Relative path, but in the same /pa/th/
+    sedStringRelPath="\(href\=\"\{0,1\}\)\([^/.][^\"]*\"\{0,1\}\)"
+    sedReplacementRelPath="\1${actOnFileScheme}:"
+    sedReplacementRelPath+="//${actOnFileAuthority}${actOnFilePath}\2"
+
+    # Relative directory (e.g., ../index.html): TODO
+    # This is rare (and informal) enough that perhaps changing all these links
+    # to links to the actual webpage ($actOnFile) would suffice? That'd be
+    # broken behavior, but less egregiously so.
+    #sedStringBailout="\(href\=\"\{0,1\}\)\.\.[^\"]*\(\"\{0,1\}\)"
+    #sedReplacementBailout="\1${actOnFile}\2"
+
+    # Any time a HREF URI is encountered that includes a :,
+    # interpret that as being a fully qualified URI and skip the rest of the
+    # substitution commands (branch to end of script) for that line,
+    # which works because there are newlines after each tag closure.
+    # This command is repeated to ensure that every successful substitution
+    # is the last one made to any given line.
+    HTML="$(echo "$HTML" | sed \
+		 -e '/href=[^>]*:/b' \
+		 -e "s=${sedStringAbsPath}=${sedReplacementAbsPath}=g" \
+		 -e '/href=[^>]*:/b' \
+		 -e "s=${sedStringRelPath}=${sedReplacementRelPath}=g" \
+		 -e '/href=[^>]*:/b' \
+		 -e "s=${sedStringBailout}=${sedReplacementBailout}=g")"
+
+    ## Cache filtered $HTML
+
+    htmlNameFiltered="${htmlNameBase}.filtered.html.gz"
+    echo "$HTML" | gzip -1q > "${htmlNameFiltered}"
+
+    if [ -z "$(diff -q "$htmlNameOriginal" "$htmlNameFiltered")" ]; then
+	rm "$htmlNameFiltered"
+	ln -s "$htmlNameOriginal" "$htmlNameFiltered"
+    fi
+
+    ## Cache rendered $HTML
+
+    # TODO add usesLynx() as a dependency test
+    #usesLynx
+
+    htmlNameRendered="${htmlNameBase}.rendered.txt.gz"
+    echo "$HTML" | \
+	lynx -dump -nolist -stdin | \
+	gzip -1q > "${htmlNameRendered}"
+
+    # w3m is often faster and has nicer visual rendering, but is more likely
+    # to place tables next to each other, which fouls searching through
+    # rendered text.
+    #echo "$HTML" | w3m -dump -T text/html | gzip -1q > "${htmlNameRendered}"
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeCacheAndFilterHTMLDone=$EPOCHREALTIME
+	bcString="($timeCacheAndFilterHTMLDone - $timeCacheAndFilterHTMLBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="cacheAndFilterHTML() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  cleanExit() removes temporary files
+cleanExit()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeCleanExitBegan=$EPOCHREALTIME
+    fi
+
+    # Limit history file to $historyLimit entries
+    if [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]; then
+	if [ -w "$historyFile" ]; then
+	    echo "$(tail -n "$historyLimit" "$historyFile")" > "$historyFile"
+	fi
+    fi
+
+    # Kill any remaining instances of waitForAWhile &
+    if [ ! -z "$waitingPID" ]; then
+	kill $waitingPID 2>/dev/null
+    fi
+
+    # Kill any remaining instances of cacheAndFilterHTML &
+    for ((count=1; count <= ${#cacheAndFilterPIDs[@]}; count++)); do
+	kill ${cacheAndFilterPIDs[$count]} 2>/dev/null
+    done
+
+    # Reset trap to avoid looping back to cleanExit
+    trap - 0
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeCleanExitDone=$EPOCHREALTIME
+	bcString="($timeCleanExitDone - $timeCleanExitBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="cleanExit() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+	exec 3>&-
+    fi
+
+    exit
+}
+
+##  createListItem() accepts a filename and returns a listOfFiles[] record
+createListItem()
+{
+    # Expects $1 to be a full file path.
+    # Strips all nonprinting chars (binary, control, newlines, tabs, etc).
+    # "Returns" a $newListItem for use in listOfFiles[]
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeCreateListItemBegan=$EPOCHREALTIME
+    fi
+
+    ## Requires input parameter
+    if [ -z "$1" ]; then
+	return 0
+    fi
+
+    ## Assemble $newListItem
+    newListItem="$($statCommand "$1")"
+    newListItem+=$'\x12'
+    newListItem+="$1"
+    newListItem+=$'\x12'
+    newListItem+="$( < "$1" gunzip -qfc | tr -cd '[:print:]')"
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeCreateListItemDone=$EPOCHREALTIME
+	bcString="($timeCreateListItemDone - $timeCreateListItemBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="createListItem() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  indexReverse() takes an index[] value and returns its numeric equivalent
+indexReverse()
+{
+    # Accepts an index[]-style input as $1
+    # "Returns" its numeric equivalent in $indexValue
+
+    # There's lots of room for improving absolute performance here,
+    # but the demands are so low and returns so quick, it has not been
+    # an issue of practical importance.
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeIndexReverseBegan=$EPOCHREALTIME
+    fi
+
+    # Input is required
+    test="$1"
+    if [ ${#test} -eq 0 ]; then
+	return 1
+    fi
+
+    # Start at the lowest value for an index with this many digits
+    count=$(( ${#indexCharacters[@]} ** $(( ${#test} - 1 )) - 1 ))
+
+    # ...and count up from there.
+    for ((; count <= indexMaximumValue; count++)); do
+	if [ "$test" = "${index[$count]}" ]; then
+	    indexValue=$count
+	    return 0
+	fi
+    done
+
+    # But if the index value is not found, return with an error
+    return 1
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeIndexReverseDone=$EPOCHREALTIME
+	bcString="($timeIndexReverseDone - $timeIndexReverseBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="indexReverse() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  mapCacheFile() reads a re-tangle.gz into a listOfFiles[] array
+mapCacheFile()
+{
+    # Expects $cacheFile to be a fully qualified file path
+    # "Returns" a populated $listOfFiles[]
+
+    # Return if cache files are not being used
+    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	:
+    else
+	return
+    fi
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeMapCacheFileBegan=$EPOCHREALTIME
+    fi
+
+    # Return if the cache file is not readable
+    if [ ! -r "$cacheFile" ]; then
+	echo "Cache file could not be read." >&2
+	return 2
+    fi
+
+    # Initialize
+    unset listOfFiles
+    unset tempArray
+
+    # For non-zero-sized cache files
+    if [ -s "$cacheFile" ]; then
+	# For compatibility with OpenBSD, which does not recognize -k
+	gunzip -qfc "$cacheFile" > "${cacheFile%.gz}"
+
+	lines="$(eval echo {0..$(( $(< "${cacheFile%.gz}" wc -l) - 1 ))})"
+	for line in $lines; do
+	    read tempArray[$line]
+	done < "${cacheFile%.gz}"
+
+	# Clear temporarily unzipped file
+	rm "${cacheFile%.gz}"
+    fi
+
+    # Reads one character as listOfFiles[0].
+    # This will need to be changed to something like [[:digit:]]+
+    # if more meta-data is added to listOfFiles[]
+    arrayKeystone=${tempArray[0]:0:1}
+
+    # Return if the transaction was unsuccessful
+    if [ -z "$arrayKeystone" ]; then
+	echo "The cache file did not contain the expected data." >&2
+	return 1
+    fi
+
+    # Copy metadata into listOfFiles[]
+    for ((count=0; count < $arrayKeystone; count++)); do
+	listOfFiles[$count]="${tempArray[$count]}"
+    done
+
+    # Copy content to listOfFiles[$listOfFiles[0]]
+    for ((; count < ${#tempArray[@]}; count++)); do
+	listOfFiles[$arrayKeystone]+="${tempArray[$count]}"$'\n'
+    done
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeMapCacheFileDone=$EPOCHREALTIME
+	bcString="($timeMapCacheFileDone - $timeMapCacheFileBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="mapCacheFile() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	profileMsg "$message"
+    fi
+}
+
+##  nameNewFile() takes query terms and returns a reasonable filename
+nameNewFile()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeNameNewFileBegan=$EPOCHREALTIME
+    fi
+
+    # Remove operators from suggestion text
+    sedString="s/(AND |OR |\+|\||BEFORE[[:digit:]]* |"
+    sedString+="AFTER[[:digit:]]* |NEAR[[:digit:]]* )//g"
+
+    # Remove negative operators and query text from suggestion text
+    newFileNameBody="$(echo "${query[@]}" | sed \
+	-e "s/ (NOT |NOR |-)[^ ]* (BEFORE|AFTER|NEAR) [^ ]*//g" \
+	-e "s/ (NOT |NOR |-)[^ ]*//g" \
+	-e "$sedString")"
+
+    # Use first term in findInclude as suggested suffix
+    newFileNameSuffix="$(echo "${findInclude[0]}" | \
+			      sed "s/[][*.^$+?{}\|-]//g")"
+
+    newFilePath="${target}"
+    newFileName="${newFilePath}/${newFileNameBody}.${newFileNameSuffix}"
+
+    # Prompt to confirm or edit
+    trap return 2
+    read -p "New file named: " -e -i "$newFileName" newFileName
+    trap cleanExit 2
+
+    # Set reasonable openWithCommand
+    if [ -n "$EDITOR" ]; then
+	revertOpenWithCommand="$openWithCommand"
+	openWithCommand=$EDITOR
+    fi
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeNameNewFileDone=$EPOCHREALTIME
+	bcString="($timeNameNewFileDone - $timeNameNewFileBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="nameNewFile() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  newInternetSearch() sets up a new search engine query
+newInternetSearch()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeNewInternetSearchBegan=$EPOCHREALTIME
+    fi
+
+    # Determine which search engine to use
+    trap return 2
+    if [ -z "$preferredInternetSearchTarget" ]; then
+	read -e -p "Search engine: " preferredInternetSearchTarget
+	if [ -z "$preferredInternetSearchTarget" ]; then
+	    # TODO: list options. At this point, DDG is the only real option.
+	    echo "A search engine is required. Perhaps try DuckDuckGo."
+	    read -e -p "Search engine [DuckDuckGo]: " \
+		 preferredInternetSearchTarget
+	    if [ -z "$preferredInternetSearchTarget" ]; then
+		preferredInternetSearchTarget=DuckDuckGo
+	    fi
+	fi
+
+    else # [ ! -z $preferredInternetSearchTarget ]
+	unset readTarget
+	read -e -p "Search engine [$preferredInternetSearchTarget]: " \
+	     readTarget
+    fi
+
+    if [ ! -z "$readTarget" ]; then
+	target="$readTarget"
+    else
+	target="$preferredInternetSearchTarget"
+    fi
+
+    # Determine what query to send
+    if [ -z "$readQuery" ]; then
+	read -e -p "New query [${query[@]}]: " readQuery
+    fi
+
+    if [ ! -z "$readQuery" ]; then
+	query=($readQuery)
+    fi
+    unset readQuery
+    trap cleanExit 2
+
+    if [ -z "$query" ]; then
+	echo "A query is required for an internet search target." >&2
+	return
+    fi
+
+    # Run the search through parseTargetArgument
+    parseTargetArgument
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeNewInternetSearchDone=$EPOCHREALTIME
+	bcString="($timeNewInternetSearchDone - $timeNewInternetSearchBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="newInternetSearch() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  openFileWith() guesses what command should act on the selected file
+openFileWith()
+{
+    # Expects $1 to be the name of the file or URI to act on.
+
+    # Expected side-effects:
+    # 1. if no $1 is provided, generate the name of a new file and open
+    #    that filename (but leave it to the opening utility to actually
+    #    create/save the file), and
+    # 2. to open that file or URI without prompting using $openWithCommand
+    #    unless $flagPromptBeforeOpening is set, which will then be unset,
+    #    and
+    # 3. to then revert $openWithCommand to $revertOpenWithCommand if the
+    #    latter is set (such as when an irregular call is made, e.g. for a new
+    #    file), then unset $revertOpenWithCommand.
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeOpenFileWithBegan=$EPOCHREALTIME
+    fi
+
+    ## Establish default $actOnFile
+    actOnFile="$1"
+    if [ -z "$actOnFile" ]; then
+	nameNewFile
+	actOnFile="$newFileName"
+    fi
+
+    ## targetKind-based handling
+    if [ -z "$revertOpenWithCommand" ]; then
+	case "${targetKind}" in
+	    localFolder)
+		## open URIlist.gz
+		if [ "${actOnFile: -11}" = ".URIlist.gz" ]; then
+		    unset query
+		    query[0]="$actOnFile"
+		    target=listOfURIs
+
+		    parseTargetArgument
+		    return
+		fi
+		;;
+
+	    listOfURIs|website)
+		## open HTTP*
+		if [ "${actOnFile:0:4}" = "http" ]; then
+
+		    # Specialized utilities first, followed by browsers
+		    # Use rtv for Reddit
+		    if [ "$useRtvForReddit" = "yes" ]; then
+			if [ "${actOnFile:12:13}" = "reddit.com/r/" ]
+			then
+			    if [ -n $(which rtv) ]; then
+				if [ -n "$(echo "${actOnFile}" | \
+				  sed -n -e "/\/comments\//p")" ]
+				then
+				    openWithCommand="rtv"
+				else
+				    actOnFile="$(echo "${actOnFile}" | \
+				    sed -e "s/^.*\.com\/r\/\(.*\)\//\1/")"
+				    openWithCommand="rtv -s"
+				fi
+			    fi
+			fi
+
+		    # Use a browser, not an editor
+		    elif [ ! -z "$browser" ]; then
+			openWithCommand="$browser"
+		    elif [ ! -z "$BROWSER" ]; then
+			openWithCommand="$BROWSER"
+
+		    # On a Mac, use the generalized 'open' command
+		    elif [ "${nameSystem:0:6}" = "Darwin" ]; then
+			openWithCommand="open"
+			flagPromptBeforeOpening=yes
+
+		    # Otherwise, punt: ask the user what to do
+		    else
+			flagPromptBeforeOpening=yes
+		    fi
+
+		    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+			# See if webpage has already been downloaded
+			testIfWebpageIsCached "$actOnFile"
+		    fi
+
+		    testFlagPromptBeforeOpening()
+		    {
+			# Avoid cacheAndFilterHTML() by setting
+			# $flagPromptBeforeOpening, as with ; commands
+			if [ ! -z "$flagPromptBeforeOpening" ]; then
+			    trap return 2
+			    read -p "Cache and filter? [y] " readCache
+			    trap cleanExit 2
+			    if [ ! "${readCache:0:1}" = "n" ]; then
+				cacheAndFilterHTML
+				actOnFile="$htmlNameFiltered"
+				# else: $actOnFile is unchanged
+			    fi
+
+			else # [ -z $flagPromptBeforeOpening ]
+			    cacheAndFilterHTML
+			    actOnFile="$htmlNameFiltered"
+			fi
+		    }
+
+		    selectCachedCopy()
+		    {
+			echo "Cached copies downloaded at:"
+			buildIndex ${#matchedFileNames[@]}
+			for ((count=${#matchedFileNames[@]}; count > 0; count--)); do
+			    echo -n "$formatIndex"
+			    echo -n "${index[$(( $count - 1 ))]} "
+			    echo -n "$normal"
+			    echo "$(date -j -f %Y%m%d%H%M%S \
+				 $(echo ${matchedFileNames[$(( $count - 1 ))]} | \
+				 sed 's=^/.*\([[:digit:]]\{14\}\) .*$=\1='))"
+			done
+
+			read -p "Select version to open: [${indexCharacters[0]}] " readVersion
+			if [ -z "$readVersion" ]; then
+			    actOnFile="${matchedFileNames[0]}"
+
+			else
+			    # Strip dot-command syntax, if used
+			    if [ "${readVersion:0:1}" = "." ]; then
+				indexReverse "${readVersion:1}"
+				indexLookupReturn=$?
+			    else
+				indexReverse "${readVersion}"
+				indexLookupReturn=$?
+			    fi
+
+			    # TODO: error handling with $indexLookupReturn
+			    if [ $indexValue -lt ${#matchedFileNames[@]} ]; then
+				actOnFile="${matchedFileNames[$indexValue]}"
+			    fi
+			fi
+		    }
+
+		    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+		    case ${#matchedFileNames[@]} in
+			0) # No cached copies found
+			    testFlagPromptBeforeOpening
+			    ;;
+
+			1) # One cached copy found
+			    actOnFileShortcut="$fileCachePath"
+			    if [ ! -z "$flagPromptBeforeOpening" ]; then
+				trap return 2
+				read -p "Cached copy found. Fetch new copy? [n] " readCachedCopy
+				trap cleanExit 2
+
+				if [ ! "${readCachedCopy:0:1}" = "y" ]; then
+				    printRight "Opening cached copy:"
+				    printf \\n
+				    actOnFile="${matchedFileNames[0]}"
+
+				else
+				    testFlagPromptBeforeOpening
+				fi
+				
+			    else # [ -z $flagPromptBeforeOpening ]
+				printRight "Opening cached copy:"
+				printf \\n
+				actOnFile="${matchedFileNames[0]}"
+			    fi
+			    ;;
+
+			*) # Multiple cached copies found
+			    actOnFileShortcut="$fileCachePath"
+			    trap return 2
+			    if [ ! -z "$flagPromptBeforeOpening" ]; then
+				actOnFileMsg
+				read -p "Cached copies found. Fetch new copy? [n] " readCachedCopy
+
+				if [ ! "${readCachedCopy:0:1}" = "y" ]; then
+				    # "Cached copies found. Fetch new copy?" --> NO
+				    read -p "Open most recent copy? [y] " readRecentCopy
+				    
+				    if [ ! "${readRecentCopy:0:1}" = "n" ]; then
+					# "Open most recent copy?" --> YES
+					printRight "Opening most recent cached copy."
+					actOnFile="${matchedFileNames[0]}"
+
+				    else
+					# "Open most recent copy?" --> NO
+					selectCachedCopy
+				    fi
+
+				else
+				    # "Cached copies found. Fetch new copy?" --> YES
+				    testFlagPromptBeforeOpening
+				fi
+
+			    else
+				# No need to prompt before opening
+				printRight "Multiple cached copies found. Opening most recent copy."
+				printf \\n
+				actOnFile="${matchedFileNames[0]}"
+			    fi
+			    trap cleanExit 2
+			    ;;
+		    esac
+		    fi
+
+		    # Handle percent-encoding in filenames:
+		    # URI-oriented commands should see %25 instead of %
+		    # Lynx accepts this; w3m requires this.
+		    actOnFile="$(echo "$actOnFile" | sed -e 's/%/%25/g')"
+		fi
+		;;
+
+	    ## open *.URIlist
+	    localFolder)
+		if [ "${actOnFile: -8}" = ".URIlist" ]; then
+		    query=("$actOnFile")
+		    target=listOfURIs
+		    parseTargetArgument
+		    return 0
+		fi
+		;;
+
+	esac
+    fi
+
+    ## If $flagPromptBeforeOpening, use interactive read
+    if [ ! -z "$flagPromptBeforeOpening" ]; then
+
+	# Assume that asking for a prompt means wanting to set a temporary
+	# $openWithCommand -- otherwise, the user should set $openWithCommand
+	# directly.
+	if [ -z "$revertOpenWithCommand" ]; then
+	    revertOpenWithCommand="$openWithCommand"
+	fi
+
+	if [ -r "$historyFile" ]; then
+	    history -n "$historyFile"
+	fi
+
+	# Allow Ctrl-C to cancel the read, not the script
+	trap return 2
+
+	read -p "Open file with [$openWithCommand]: " -e readOpenWithCommand
+	printf \\n
+
+	trap cleanExit 2
+
+	if [ ! -z "$readOpenWithCommand" ]; then
+	    openWithCommand="$readOpenWithCommand"
+	fi
+
+	unset flagPromptBeforeOpening
+    fi
+
+    ## Send status update
+    actOnFileMsg
+
+    ## Open the file
+
+    # If $openWithCommand includes '{}', substitute each '{}' with
+    # $actOnFile, leaving the ordering up to the user
+    if [ ! -z "$(echo "$openWithCommand" | sed -n '/{}/p')" ]; then
+
+	# Add escape in front of '=' symbols if present
+	openWithCommand="$(echo "$openWithCommand" | sed 's/=/\=/g')"
+
+	# Use '=' in sed command to avoid confusion with / in filenames
+	eval $(echo "$openWithCommand" | sed \
+		    -e "s={}=\"${actOnFile}\"=g")
+
+    # Otherwise, treat $actOnFile as an argument to $openWithCommand
+    else
+	eval "$openWithCommand" \""${actOnFile}\""
+    fi
+
+    ## Add to history
+    if [ ! -z $enableHistory ] && [ "$enableHistory" = "yes" ]; then
+	if [ -w "$historyFile" ] || [ -w "$fileUserPath" ]; then
+	    touch "$historyFile"
+
+	    if [ ! "$(< "$historyFile" sed -n '$p')" = "$openWithCommand" ]
+	    then
+		echo "$openWithCommand" >> "$historyFile"
+	    fi
+	fi
+    fi
+
+    ## Revert command
+    if [ ! -z "$revertOpenWithCommand" ]; then
+	openWithCommand="$revertOpenWithCommand"
+	unset revertOpenWithCommand
+    fi
+
+    ## profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeOpenFileWithDone=$EPOCHREALTIME
+	bcString="($timeOpenFileWithDone - $timeOpenFileWithBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="openFileWith() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+
+    ## Exit if not set to stay open
+    if [ -z "$stayOpenInBackground" ] || [ ! "$stayOpenInBackground" = "yes" ]
+    then
+	cleanExit
+    fi
+}
+
+##  parseKindArray() handles $kind options and defines $findInclude[]
+parseKindArray()
+{
+    # TODO: handle more options such as automatic MIME-type association
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeParseKindArrayBegan=$EPOCHREALTIME
+    fi
+
+    # Define $findInclude[] as $kindArray[]
+    if [ ! -z "${kindArray[0]}" ]; then
+	findInclude=(${kindArray[@]})
+    fi
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeParseKindArrayDone=$EPOCHREALTIME
+	bcString="($timeParseKindArrayDone - $timeParseKindArrayBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="parseKindArray() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  printRight() prints right-justified text
+printRight()
+{
+    # Does /not/ append new line.
+
+    echo -n "$(tput sc)$(tput cuu 1)$(tput cub $(tput cols))$(tput cuf \
+	$(( $(tput cols) - ${#1} )) )$1$(tput rc)"
+}
+
+##  processAutocensor() applies the autocensor filter
+processAutocensor()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeProcessAutocensorBegan=$EPOCHREALTIME
+    fi
+
+    if [ -r "$fileAutocensorRegExps" ]; then
+	# Transform each line of $fileAutorcensorRegExps
+	# into a sed address, which is then deleted from
+	# $listOfURIs
+	autocensorCommands="$( < "$fileAutocensorRegExps" \
+			      sed 's/^\(.*\)$/-e \/\1\/d /' | \
+			      paste -s -d '\n' -)"
+	listOfURIs="$(echo "$listOfURIs" | sed $autocensorCommands)"
+    fi
+
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeProcessAutocensorDone=$EPOCHREALTIME
+	bcString="($timeProcessAutocensorDone - $timeProcessAutocensorBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="processAutocensor() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  processBrightlist() applies the brightlist filter
+processBrightlist()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeProcessBrightlistBegan=$EPOCHREALTIME
+    fi
+
+    if [ -r "$fileBrightlistRegExps" ]; then
+	brightlistLines=$(( $(< "$fileBrightlistRegExps" wc -l) + 0 ))
+
+	# TODO: rewrite with the 'read' function
+	# Takes each line as a sed address, and matches are copied to a
+	# temporary variable, then deleted from the $listOfURIs, then added
+	# to the top of the $listOfURIs
+	for ((count=1; count <= "$brightlistLines"; count++)); do
+	    brightlistTest="$(< "$fileBrightlistRegExps" sed -n "${count}p")"
+	    listOfBrightURIs+="$(echo "$listOfURIs" | \
+				      sed -n -e "/${brightlistTest}/p")"
+	    listOfURIs="$(echo "$listOfURIs" | sed "/${brightlistTest}/d")"
+	done
+
+	# Download and cache bright items, unless already cached
+	if [ ${#listOfBrightURIs} -gt 0 ]; then
+	    brightlistResultCount=$(echo "$listOfBrightURIs" | wc -l)
+	    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+		for ((count=1; count <= $brightlistResultCount; count++)); do
+		    curlSilent="-s"
+		    read actOnFile
+		    testIfWebpageIsCached "$actOnFile"
+		    if [ ${#matchedFileNames[@]} -eq 0 ]; then
+			cacheAndFilterHTML &
+			cacheAndFilterPIDs+=($!)
+		    fi
+		done <<< "$listOfBrightURIs"
+	    fi
+	fi
+	
+	# Add bright URIs to the top of the list
+	listOfBrightURIs="$(echo -e "$listOfBrightURIs\n$listOfURIs")"
+	listOfURIs="$listOfBrightURIs"
+	unset listOfBrightURIs
+	unset brightlistResultCount
+    fi
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeProcessBrightlistDone=$EPOCHREALTIME
+	bcString="($timeProcessBrightlistDone - $timeProcessBrightlistBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="processBrightlist() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  processInternetSearch() queries a search engine
+#   See cacheAndFilterHTML() for general webpage retrieval
+processInternetSearch()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeProcessInternetSearchBegan=$EPOCHREALTIME
+    fi
+
+    usesCurl
+
+    # if $queryURLpage exists, we'll be appending to an existing file that
+    # has already been named ($queryURLpage is used to retrieve subsequent
+    # pages from search engines). Otherwise, generate new filename. 
+    if [ -z "$queryURLpage" ]; then
+	fileResults="${fileCachePath}/"
+	fileResults+="${targetKind}/"
+	fileResults+="$(date "+%G%m%d%H%M%S") "
+	fileResults+="${target}"
+	fileResults+=" - "
+	# Escape slashes and bangs from query before using in file name.
+	fileResults+="$(echo "${query[@]}" | sed -e 's=/=\\\/=g' \
+				      	     	 -e 's=!=\\\!=g')"
+	#fileResults+="${query[@]}"
+	fileResults+=".URIlist.gz"
+    fi
+
+    # profiling: web requests represent a large portion of this script's
+    # total latency, so measure this alone
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeCurlBegan=$EPOCHREALTIME
+    fi
+
+    # If not in a pipeline, provide status update.
+    if [ -t 1 ]; then
+	echo -n "Query sent. Response: " >&2
+    fi
+
+    # gunzip is used here in case curl sends a user agent that allows for
+    # compressed results. The -f flag should avoid any problems with cleartext.
+    searchResults="$(eval $curlCommand \""${queryURL}"\" | gunzip -qf)"
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeCurlDone=$EPOCHREALTIME
+	bcString="($timeCurlDone - $timeCurlBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="curl "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+
+    # stripHtmlToListOfURIs strips HTML to a list of links,
+    # while processAutocensor and processBrightlist act on the result,
+    # $listOfURIs
+    stripHtmlToListOfURIs "$searchResults"
+    processAutocensor
+    processBrightlist
+
+    # Write the result to cache
+    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	if [ ! -d "$fileCachePath/${targetKind}" ]; then
+	    eval "mkdir -p $fileCachePath/${targetKind}"
+	fi
+
+	if [ ! -r "$fileResults" ]; then
+	    echo "$listOfURIs" | gzip -q1 > "$fileResults"
+
+	# If $fileResults is readable: unzip, append, read whole, re-zip.
+	else
+	    gunzip -q "$fileResults"
+	    echo "$listOfURIs" >> "${fileResults%.gz}"
+	    listOfURIs="$(cat "${fileResults%.gz}")"
+	    gzip -q1 "${fileResults%.gz}"
+	fi
+    fi
+
+    # Set metadata
+    metadataTarget="$target"
+    metadataQuery="${query[@]}"
+    target="$listOfURIs"
+    targetKind=listOfURIs
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeProcessInternetSearchDone=$EPOCHREALTIME
+	bcString="($timeProcessInternetSearchDone - $timeProcessInternetSearchBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="processInternetSearch() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  profileMsg() sends right-aligned text to /dev/fd/3
+profileMsg()
+{
+    # This function should only be called if profiling=on as set
+    # near the top of the script, where 3>&1 is executed
+
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	message="$1"
+
+	if [ -z $countMessage ]; then
+	    countMessage=1
+	else
+	    ((countMessage++))
+	fi
+
+	# Line breaks and other whitespaces are in the middle of tput
+	# commands so they aren't printed literally
+	echo -ne "$(tput sc)$(tput cup \
+	    $(( $(tput lines) - 1 )) \
+	    $(( $(tput cols) - ${#message} )))$message\n$(tput rc)" >&3
+    fi
+}
+
+## setIndexCharacters() turns a string into ordered index
+setIndexCharacters()
+{
+    # Expects $1 to be a string of characters.
+    # "Returns" a populated $indexCharacters[] array.
+
+    # TODO: detect illegal characters (e.g., .,;)
+    
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeSetIndexCharactersBegan=$EPOCHREALTIME
+    fi
+
+    # Initialize
+    unset indexCharacters
+    unset indexVerify
+    indexString="$1"
+    for ((count=0; count < ${#indexString}; count++)); do
+	indexCharacters[$count]="${indexString:$count:1}"
+	indexVerify+="${indexString:$count:1}"$'\n'
+    done
+
+    # Check for duplicate characters
+    indexExtras=($(echo "$indexVerify" | sort | uniq -d))
+    for ((count=0; count < ${#indexExtras[@]}; count++)); do
+	indexString="$(echo "$indexString" | sed \
+			    -e "s/${indexExtras[$count]}//g" \
+			    -e "s/^\(.*\)$/\1${indexExtras[$count]}/")"
+    done
+
+    # If duplicate characters are found, rebuild $indexCharacters[]
+    # without them and warn the user.
+    if [ "${#indexExtras[@]}" -gt 0 ]; then
+	unset indexCharacters
+	for ((count=0; count < ${#indexString}; count++)); do
+	    indexCharacters[$count]="${indexString:$count:1}"
+	done
+	warnDuplicateIndexChars=yes
+    fi
+
+    unset indexVerifyExtras
+    unset indexVerify
+    unset indexString
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeSetIndexCharactersDone=$EPOCHREALTIME
+	bcString="($timeSetIndexCharactersDone - $timeSetIndexCharactersBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="setIndexCharacters() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  stripHtmlToListOfURIs() accepts HTML and outputs list of URIs
+stripHtmlToListOfURIs()
+{
+    # Expects $1 to be the contents of a HTML file as a string.
+    usesW3m
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeStripHtmlToListOfURIsBegan=$EPOCHREALTIME
+    fi
+
+    # generate links with w3m
+    # TODO: add option to use Lynx
+    listOfURIs="$(echo "$1" | \
+	w3m -o display_link_number=1 -dump -T text/html | \
+	sed -e '1,/^References:$/d' \
+	    -e '/^[[:blank:]]*$/d' \
+	    -e 's/^\[[[:digit:]]*\] //')"
+
+    # Puppet-specific search processing
+    if [ "$target" = "Puppet" ]; then
+	listOfURIs="$(printf %s\\n "$listOfURIs" | \
+			     sed -e '1,/vulnerability-submission/d' \
+				 -e '/^[-]$/,$d' \
+				 -e 's/^file:\/\//https:\/\/puppet.com/')"
+    fi
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeStripHtmlToListOfURIsDone=$EPOCHREALTIME
+	bcString="($timeStripHtmlToListOfURIsDone - $timeStripHtmlToListOfURIsBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="stripHtmlToListOfURIs() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+##  testIfWebpageIsCached() checks a URI against the web cache
+testIfWebpageIsCached()
+{
+    # Takes a URI as $1
+    # Any matches are returned in matchedFileNames[],
+    # with the newest file in [0] as the "filtered" version
+
+    # Return if cache files are not being used
+    if [ ! -z $cacheListOfFiles ] && [ "$cacheListOfFiles" = "yes" ]; then
+	:
+    else
+	return
+    fi
+
+    if [ -d "${fileCachePath}/webpages" ]; then
+	unset matchedFileNames
+
+	# This should mirror the naming in cacheAndFilterHTML()
+	proposedFileName="$(echo "$1" | \
+				sed -e 's/\(\[()]\)/\\\1/g' | \
+				tr '/:?' '?')"
+
+	# Spaces in filenames lead to word splitting, so
+	# translate them into $'\x12', create the array, then
+	# restore into spaces.
+	matchedFileNames=($(find "${fileCachePath}/webpages" \
+				-iname '*'"$proposedFileName"'*' \
+				-iname '*'filtered'*' | \
+				tr ' ' $'\x12' | \
+				sort -r))
+
+	for ((count=0; count < ${#matchedFileNames[@]}; count++)); do
+	    matchedFileNames[$count]="$(\
+				echo "${matchedFileNames[$count]}" | \
+				tr $'\x12' ' ')"
+	done
+    fi
+}
+
+##  waitForAWhile() lets the user know that stuff is happening
+waitForAWhile()
+{
+    exitSilently()
+    {
+	exit
+    }
+
+    trap exitSilently 15
+
+    sleep 0.3
+    echo -n "Building list of files: "
+    count=3
+    while [ $count -lt 15 ]; do
+	# Build the dancing bear
+	echo -n "$(tput smacs)p$(tput rmacs)\_"
+	echo -n "($(tput smacs)fgf$(tput rmacs))"
+	echo -n "_/$(tput smacs)p$(tput rmacs)"
+	sleep 1
+	echo -n "$(tput cub 40)$(tput cuf 24)"
+	echo -n "$(tput smacs)p$(tput rmacs)\\"
+	echo -n "($(tput smacs)fgf$(tput rmacs))"
+	echo -n "__/$(tput smacs)p$(tput rmacs)"
+	sleep 1
+	echo -n "$(tput cub 40)$(tput cuf 24)"
+	echo -n "$(tput smacs)p$(tput rmacs)\_"
+	echo -n "($(tput smacs)fgf$(tput rmacs))"
+	echo -n "_/$(tput smacs)p$(tput rmacs)"
+	sleep 1
+	echo -n "$(tput cub 40)$(tput cuf 24)"
+	echo -n "$(tput smacs)p$(tput rmacs)\__"
+	echo -n "($(tput smacs)fgf$(tput rmacs))"
+	echo -n "/$(tput smacs)p$(tput rmacs)"
+	sleep 1
+	echo -n "$(tput cub 40)$(tput cuf 24)"
+	count=$(($count+1))
+    done
+}
+
+### Userland Docs
+buildDocStrings()
+{
+## Help messages
+userStartMessage="\
+Re-Tangle can help you find the document you want and open it in the way you want.\n\
+\n\
+Point Re-Tangle at a folder, then search its contents:\n\
+\tFrom the command line:\n\
+\t\tshell $ re-tangle -t ~/Dropbox/nv -- interesting topic\n\
+\tOr from within Re-Tangle:\n\
+\t\tre-tangle > ,target ~/Dropbox/nv\n\
+\t\tre-tangle > interesting topic\n\
+\n\
+\",target\" can be abbreviated as \",t\":\n\
+\t\tre-tangle > ,t ~/Dropbox/nv\n\
+\n\
+Point Re-Tangle at a search engine:\n\
+\tFrom the command line:\n\
+\t\tshell $ re-tangle -t DuckDuckGo -- interesting topic\n\
+\tOr from within Re-Tangle:\n\
+\t\tre-tangle > ,search interesting topic\n\
+\t\tSearch engine: DuckDuckGo\n\
+\n\
+\",search\" can be abbreviated as \",s\":\n\
+\t\tre-tangle > ,s interesting topic\n\
+\n\
+Or start searching in one place, then try another -- while keeping the same search terms:\n\
+\t\tshell $ re-tangle -t ~/Dropbox/nv\n\
+\t\tre-tangle > interesting topic\n\
+\t\tre-tangle > ,t ~/Desktop\n\
+\t\tre-tangle > ,t DuckDuckGo\n\
+\n\
+If you want to then refine your results, enter more search terms. Starting a new query with an operator in ALL CAPS will continue the previous search. Assuming the previous search was for \"interesting topic\", the following will search for \"interesting topic AND useful OR funny information\":\n\
+\t\tre-tangle > AND useful OR funny information\n\
+\n\
+You can use AND, OR, NOT, NOR, BEFORE, AFTER, and NEAR keywords.\n\
+\t\tre-tangle > fire AND fox NOT wild NEAR acres\n\
+\n\
+Starting a new query without an operator will replace any previous search.\n\
+\n\
+Internet searches cannot be modified without sending a new query. Searches of the search results, however, can include any and all of the same operators as local searches.\n\
+\n\
+Get more results from the last internet search (as with the \"next page\" of results) by using:\n\
+\t\tre-tangle > ,more\n\
+\n\
+If you want to then open a selection, enter the dot-command listed to the left of your desired selection:\n\
+\t\tre-tangle > .h\n\
+\n\
+Entering \"return\" will select the first (bottom-most) item. If no search has been performed, \"return\" will exit the script.\n\
+\n\
+If a search has been performed but no results were found, \"return\" will prompt you to select a filename to be created. You can create a new file even if there are results by entering \";\" alone.\n\
+\n\
+Re-Tangle will normally guess which utility to use. If it recognizes a document, it will default to \$EDITOR; if a web page, to \$BROWSER. If \$EDITOR is set to \"vim\" and \".h\" pointed to \"notes.txt\", then the above selection would have resulted in Re-Tangle running the command \"vim notes.txt\".\n\
+\n\
+To specify your own utility, use a semicolon:\n\
+\t\tre-tangle > ;h\n\
+\t\tOpen file with [vim]: emacs\n\
+\n\
+The symbol \"{}\" can be used in place of the filename in complex commands. If \"{}\" is used, the filename will not be automatically appended to the command, but it can be used multiple times. The following command would run \"head -n 10 notes.txt && tail -n 5 notes.txt\":\n\
+\t\tOpen file with [vim]: head -n 10 {} && tail -n 5 {}\n\
+\n\
+To re-display your current results:\n\
+\t\tre-tangle > ,print\n\
+\tor:\n\
+\t\tre-tangle > ,p\n\
+\n\
+To remove your query and see all possible results:\n\
+\t\tre-tangle > ,all\n\
+\tor:\n\
+\t\tre-tangle > ,a\n\
+\n\
+To update the results, such as if a file has changed in the meantime:
+\t\tre-tangle > ,update\n\
+\tor:\n\
+\t\tre-tangle > ,u\n\
+\n\
+To search your previous internet searches:\n\
+\t\tre-tangle > ,t searchHistory\n\
+\tor:\n\
+\t\tre-tangle > ,t sh\n\
+\n\
+You can specify a favorite document location in the \$defaultNotesTarget variable and then access it with:\n\
+\t\tshell $ re-tangle -t notesFolder\n\
+\tor:\n\
+\t\tshell $ re-tangle -t n\n\
+\t\tre-tangle > ,t n\n\
+\n\
+You can specify a list of interesting sites in the \$readingList variable and then access it with:\n\
+\t\tshell $ re-tangle -t readingList\n\
+\tor:\n\
+\t\tshell $ re-tangle -t r\n\
+\t\tre-tangle > ,t r\n\
+\n\
+Other utilities can add to the reading list, currently set to \"$readingList\", using \">>\" shell redirection.\n\
+\n\
+When reviewing the reading list, use the \",remove\" (or \",rm\") command to remove items from the list either singly or in ranges, with or without a dot-index indicator:\n\
+\t\tre-tangle > ,rm .o\n\
+\t\tre-tangle > ,rm h-l\n\
+\n\
+Re-Tangle can filter webpages in addition to searching for and retrieving them. There are three different kinds of filters:\n\
+\t1. brightlist,\n\
+\t2. autocensor, and\n\
+\t3. HTML filters.\n\
+\n\
+The brightlist looks for preferred websites in internet search results. When one is found, it is automatically downloaded, filtered, and cached (if it hasn't already been cached), and it is them promoted to the front of all non-brightlisted search results. (Search rankings are retained among multiple brightlisted pages.) The brightlist is a list of regular expressions stored in \${fileUserPath}/filters/brightlist, currently:\n\
+\t${fileUserPath}/filters/brightlist\n\
+\n\
+The autocensor is the opposite of the brightlist: when a match is found, it is removed from the search results and never displayed. The autocensor list of regular expressions is stored in:\n\
+\t${fileUserPath}/filters/autocensor\n\
+\n\
+HTML filters include all other files in the \${fileUserPath}/filters/ folder. Each time a web page is selected, its URI is compared with those file names as if the file name were a regular expression. If the file name matches the selected URI, the contents of that file is applied to the HTML downloaded from that URI with each line of the file being treated as a separate 'sed' command (using traditional/obsolete regexp syntax because your eccentric author likes the 'ed' utility).\n\
+\n\
+Additionally, Re-Tangle parses every hyperlink within a downloaded webpage and compensates for the change of address (from a website to a local file). This feature is still being developed but all of the following kinds of link should work: absolute (\"href=https...\"), absolute within the same authority (\"href=/path/page\"), relative within same path (\"href=page\"), and fragment (\"href=#anchor\"). Caution should be used with sites that use relative paths (\"href=../page\").\n\
+\n\
+Re-Tangle can be invoked to directly download, filter, and display a web page:\n\
+\tBased on defaults, without prompting:\n\
+\t\tshell $ re-tangle -t html -- https://www.site.url/path/page\n\
+\tWith prompts for each option:\n\
+\t\tshell $ re-tangle -t HTML -- https://www.site.url/path/page\n\
+If an address is provided without the URI scheme (normally \"http\" or \"https\") and is not recognized as a local file or folder, Re-Tangle adds a \"https://\" prefix.\n\
+\n\
+Re-Tangle should be considered to be in early development, and its lack of proper documentation should be taken as an indication of that. For now, if you want more information, your best choice is likely to read the source code.\n\
+\n\
+Thanks for your interest!"
+
+userManualMessage="\
+NB: This text has not been updated and is likely out of date.\n\
+\n\
+# Invocation Usage\n\
+\n\
+Search the internet:\n\
+\tre-tangle -t DuckDuckGo [query terms]\n\
+\n\
+Search a local folder:\n\
+\tre-tangle -t /path/to/folder [query terms]\n\
+\n\
+\t-a\tDisables sourcing of .bashrc and .bash_aliases\n\
+\t-A file\tSpecifies filename to source (can be used multiple times)\n\
+\t-c\tMakes searches case sensitive\n\
+\t-C\tMakes searches case insensitive\n\
+\t-d #\tSets depth of folders to search (\"1\" for specified folder only)\n\
+\t-h\tDisables history recording\n\
+\t-H\tEnables history recording\n\
+\t-i str\tDefines characters to use in index (order is significant)\n\
+\t-k str\tRestricts local searches to filenames that match string\n\
+\t\t(can be used multiple times)\n\
+\t-o str\tDefines the default utility used to open selections\n\
+\t-t str\tDefines the source of search results\n\
+\t-u file\tSpecifies filename to source (can be used multiple times)\n\
+\t-z\tQuit after selecting an item and launching a utility\n\
+\t-Z\tStay open in the background\n\
+\t-0\tWhen used in a pipeline, print results with null delimiters\n\
+\n\
+# Overview\n\
+\n\
+Re-Tangle does not propose to add new capabilities that existing tools lack, only to make some of those capabilities more accessible and more consistent between resource types. Re-Tangle provides an interface for searching (either using the 'find' utility for local resources or an internet search engine for remote resources) and then filtering (with the 'grep' utility) and acting on the results (with any utility accessible from the command line). Searches are conducted without having to construct a 'find' command or navigate to a search engine. Filtering hides the complexities of using regular expressions, of searching both file name and content, and of searching across line boundaries. Results can be acted on with any local utility or utilities, including graphical applications and complex shell commands, but context usually suggests a sane default of either \$BROWSER or \$EDITOR.\n\
+\n\
+Searches operate on two principal parameters: the \$target variable and the \$query[] array. \$target suggests the source of search results: for example, a value of \"~/Dropbox/notes\" indicates a local search using 'find,' while a value of \"DuckDuckGo\" indicates an internet search using that particular engine. \$query[] contains the keywords and operators used with \$target to return appropriate results.\n\
+\n\
+Re-Tangle understands the following advanced operators: AND, OR, NOT, NOR, BEFORE, AFTER, and NEAR (as well as their synonyms and numbered versions). Entering a query that begins with one of these operators will prefix the current query with the previous query; otherwise, any query will replace the previous one. Unless another operator is present, AND is implied between all terms.\n\
+\n\
+When used in a pipeline, Re-Tangle outputs one entry per line (or with null delimiters when invoked with \"-0\") in descending order, formatted to be suitable for use with utilities like 'xargs.' Status messages might be printed to standard error but will not contaminate standard output.\n\
+\n\
+When invoked interactively, Re-Tangle allows for further refinement of and interaction with the results. Results are presented in descending order so that the first hit is printed right above the command prompt. Each line contains an index value so that any item can be quickly selected using text input. The item name is then listed followed by a brief preview, if space permits. More detailed previews can always be seen by acting on the item with an appropriate utility, such as 'grep -nC3 keyword' or 'head.' The current query can also be modified and/or applied to a different target, using the same query with different local folders and search engines.\n\
+\n\
+Local search results can be filtered by editing or replacing the query, target, or other search parameters including file name, case sensitivity, and folder depth of the search.\n\
+\n\
+Internet search results are translated into a list of URLs. This list can then be reviewed and filtered directly or bulk downloaded, rendered, and searched as content, and remains available (if file history is enabled) for later review, even offline. Site titles and metadata descriptions are intentionally ignored.\n\
+\n\
+Re-Tangle offers five kinds of website filtering tools. The first is the removal of duplicated entries. The second is the autocensor: a 'sed -f' compatible list of regular expressions where any match is eliminated from the list of results. The third is the brightlist: a similar list of regular expressions, but any match is promoted above all non-matching items. These three filters are applied automatically to every internet search, although they can be disabled when invoking Re-Tangle from the command line. TODO: add ,censor and ,bright commands.\n\
+\n\
+The fourth kind of filter is interactive. Entering new search terms, optionally with advanced operators, will conduct a local search against the internet search results. If such a search is then applied to a local \$target, both the search engine query and the subsequent local search terms are combined to form the new \$query[]. TODO: should apply to all changes of \$target, even reiterating the same \$target.\n\
+\n\
+The last kind of filter consists of content modifiers: when one of these is triggered, it applies a list of regular expressions to the site's HTML file before sending the resulting page to a browser for rendering. Content modifiers are particularly useful in making some sites more accessible to users of non-graphical browsers.\n\
+\n\
+To act on selected results, Re-Tangle evaluates the \$openWithCommand variable with the selected item as an argument, and understands \"{}\" as a pronoun to support complex or multiple actions. In this way, Re-Tangle can, for example, open the selected file in Vim on line 42 (openWithCommand=\"vim +42\"), securely erase the selected file (openWithCommand=shred or =\"rm -P\", depending on the system), or open the selected file in three browsers at once (e.g., on macOS, if compression is disabled, openWithCommand=\"open -a 'Safari.app' {} & open -a 'Firefox.app' {} & lynx {}\") TODO: {} is not well tested and open -a is not predictable between apps. Verify these claims.\n\
+\n\
+Re-Tangle uses Bash's readline for its prompts. Command history (kept separately from Bash's shell command history) enables searches of searches, re-using complex \$openWithCommand values, and returning to previous states. Re-Tangle will respect line-editing preferences in .inputrc, using Emacs-like or Vi-like key bindings as appropriate. Finally, Re-Tangle can load (or ignore) any .bashrc and .bash_aliases files to ensure all behavior matches expectations.\n\
+\n\
+# About Cache and Privacy\n\
+\n\
+By default, Re-Tangle will save a substantial amount of data to the ~/.config/re-tangle folder, including past searches and copies of their results. Future plans for Re-Tangle include adding a \"leave no trace\" feature, which can now be mimicked by disabling history and cache from within the script file -- see the definitions of cacheListOfFiles= and enableHistory= -- as well as database size management. However, these functions are still immature and may require personal attention.\n\
+\n\
+Until those features are mature, users should assume that every document in any searched folder has been copied to ~/.config/re-tangle.\n\
+\n\
+Re-Tangle should not write any file outside the ~/.config/re-tangle folder (without being explicitly asked to do so by the user, such as when selecting a text document and editing it). If that behavior is seen, please report it as a bug.\n\
+\n\
+Re-Tangle is not designed to record or report any user metrics whatsoever."
+  
+
+oldHelpMessage="\
+This text is even more out of date than the previous one!\n\
+\n\
+This script searches the contents of files in a given folder. This folder can be changed; see the description of the \",target\" command, below. The folder currently selected is:\n\
+\t${target}\n\
+\n\
+Candidate results are initially filtered by kind, as defined in the array variable \$findInclude, currently \"${findInclude[@]}\". This value can be changed; see the description of the \",kind\" command, below.\n\
+\n\
+Search results are then generated using the given query, which can include search terms and search operators. An initial query can be passed to the script from the command line; any arguments that are not recognized options will be interpreted as the query, however symbols such as | and \" may require escaping, depending on the shell you are using. Queries may also be entered at the \"$prompt\" prompt.\n\
+\n\
+Search terms are passed to Grep as traditional regular expressions. Generally, words from ordinary human languages will be used as expected. The presence of symbols, however, can lead to complex behavior. The \".\" symbol will match any character, for instance; a query of \".\" will therefore match all possible results, not just those that include periods. To learn more about regular expressions, see the re_format(7) manual page (i.e., enter \"man 7 re_format\" after quitting Re-Tangle). The major exception to this behavior is that Re-Tangle ignores line breaks: a term of \"a.*b\" will match \"a\" followed by \"b\" anywhere in the file, not just on any given line. Re-Tangle also searches file names in addition to their contents.\n\
+\n\
+The following search operators can be used:\n\
+\tAND\tNOT\tBEFORE[n]\n\
+\tOR\tNOR\tAFTER[n]\n\
+\t\t\tNEAR[n]\n\
+\n\
+AND is implied between any two consecutive terms unless another operator is explicitly used. A \"foo bar\" query will search for \"foo AND bar\".\n\
+\n\
+\"+word\" is a synonym for \"AND word\". \"|word\" is a synonym for \"OR word\". \"-word\" is a synonym for \"NOT word\". OR applies to the previous AND term, regardless of any intervening NOT or NOR terms. NOR applies to the previous NOT term, regardless of any intervening AND or OR terms. A \"widget -gizmo |gadget NOR trinket\" query will search for \"widget OR gadget NOT gizmo NOR trinket\".\n\
+\n\
+BEFORE, AFTER, and NEAR all limit searches by how terms are positioned relative to each other. An \"egg BEFORE omelette\" query will only match items where \"omelette\" appears after \"egg\". The distance between terms can be set using \"BEFOREn\" where n is zero or a positive integer that does not exceed the abilities of your Grep tool, usually 255. The value of n defines the maximum number of whitespace breaks that can occur between the search terms and still result in a match. A \"cart BEFORE3 horse\" query will match \"carts usually follow horses\" because \"horse\" is in the third term, and will also match \"cartridges cannot feed hobby-horses\" because extra characters and hyphens are not counted, but that query will not match \"carts are placed before horses\" where \"horse\" is in the fourth term. AFTER operates in the same manner but with a reversed word order. NEAR searches in both directions for up to $defaultCountForNear words, while NEARn searches for up to n words.\n\
+\n\
+BEFORE, AFTER, and NEAR take precedence over OR and NOR. A \"rock OR duck BEFORE rabbit\" query will match either \"rock\" or \"duck BEFORE rabbit\" but not \"rock OR duck\". To form a compound command, repetition is required: \"rock BEFORE rabbit OR duck BEFORE rabbit\" will match either rock or duck when either comes before an instance of rabbit.\n\
+\n\
+\"Strings in double quotes\" collapse to form a single search term, but the query expands spaces to include tabs, linebreaks, and other whitespace between words. For example, an unquoted \"brave Robin\" query expands to \"brave AND Robin\" which will match \"brave Sir Robin\", but \"\"brave Robin\"\" will never match the same candidate item.\n\
+\n\
+Queries can be built cumulatively at the prompt by beginning a search with an operator. That is, if you previously entered a search for \"life\" and now want to search for \"life david\", searching for \"+david\" will build the query as \"life AND david\". Queries that do not start with an operator discard any previous query.\n\
+\n\
+Any result can be selected by entering the associated dot-index value that appears in the left column (e.g., \".${indexCharacters[0]}\").\n\
+\n\
+\"Enter\" selects the last (bottom-most) search result. If no search has been performed, \"Enter\" will cause the script to quit. If a search has been performed but there are no results, \"Enter\" will prompt for a file name in the same manner as \";\", discussed next.\n\
+\n\
+\";\" can be used to create a new file based on the existing query. \";\" will create a prompt with a proposed file name based on all inclusive terms in the active query, without any operators and without any exclusive terms, and with an extension derived from the first element of the \$findInclude array (currently \".$(echo "${findInclude[0]}" | sed "s/[][*.^$+?{}\|-]//g")\"). The accepted filename will then be treated as the selected file; to avoid clobbering any existing file, the opening command discussed below will be responsible for opening the accepted filename and saving it as a new file.\n\
+\n\
+\";\" followed by a dot-index character (e.g., \";${indexCharacters[0]}\" instead of \".${indexCharacters[0]}\") will select the same file as the dot-index command but will additionally prompt for the command to open the selected file with, discussed next.\n\
+\n\
+The selected file is passed as an argument to the command named in the \$openWithCommand variable. This will default to the setting in the script or in a configuration file. The value of \$openWithCommand can also be changed automatically or interactively. If \"Enter\" or \";\" is used to create a new file, the value of \$EDITOR is used if it exists. The \"-o string\" and \"--open-with=string\" command line arguments will set the \$openWithCommand default for an entire session. The \",openWith\" can be used to change the default \$openWithCommand for the rest of the session. A semicolon command will prompt to change \$openWithCommand for the next operation.\n\
+\n\
+If \$openWithCommand includes the string \"{}\" then each instance of {} will be replaced by the full filename of the selected item, and the item's name will not be appended to the end of the command. Note that this passes through several layers of Bash's magical yet infuriating expansion and de-quoting, so that \"double-quoted filenames\" are passed as expected but space\\ escaped\\ filenames are split into separate words. TLDR: when using {}, surround filenames in double quotes.\n\
+\n\
+Examples of when modifying \$openWithCommand might be useful:\n\
+(1) Quick edits without leaving the Re-Tangle interface: Opening a selected file with \"grep -nC3 rabbit\" will search the selected file for \"rabbit\" and print each result with line numbers and three lines before and after each hit to provide context. The file can then be edited if necessary by issuing a sed command such as \"sed -i -e 43s/rabbit/rabid/\".\n\
+(2) Graphical tools can be mingled with terminal utilities as desired: \"open -a 'Sublime Text.app'\", \"emacsclient -c\", and \"vim\" are all equal citizens. \n\
+(3) Files can also be opened with non-editors. HTML files can be sent to \"open -a 'Firefox.app'\" or \"lynx\". Unwanted files can be removed with \"rm -P\". Files can be moved or renamed using \"mv {} \"~/newpath/newname\"\".\n\
+\n\
+Commands starting with a period or semicolon are reserved for dot-index selections. Commands starting with a comma are reserved for internal operations. To search for \".word\", \",word\" or \";word\", either start the command with an operator (e.g., \"AND .word\") or use a double symbol: \"..word\" will search for \".word\".\n\
+\n\
+Bash's readline is used for all prompts, meaning that Emacs-like editing commands are supported by default while Vi-like editing and many other options are available and can be configured with the .inputrc file (see the Bash manual for details). Aliases can be used from within the script if they are sourced, such as from .bashrc (currently: $useBashrc) and .bash_aliases (currently: $useBashAliases). See the \$useBashrc and \$useBashAliases configurations in the script file for more details.\n\
+\n\
+\",all\" or \",a\" will unset the current query and display all search results from the current target.\n\
+\n\
+\",history\" and \",hi\" toggle \$enableHistory which, if \"yes\", stores command history that can then be accessed with the up arrow, Ctrl-R, or any other Bash readline method. Unlike Bash, history includes both the command as entered (e.g., \"AND bar\") and the resulting query (e.g., \"foo AND bar\"). If \"no\", new commands are not stored but previous commands are still available. The history file is located at:\n\
+\t${historyFile}\n\
+\n\
+\",kind\" or \",k\" will prompt to change \$findInclude. \",kind string\" or \",k string\" will change \$findInclude without an interactive prompt. Either way, any number of kinds can be entered and all will be included in future searches within the same session. To make changes permanent, edit the first instance of \"findInclude=()\" in the script or configuration file. To start a session with a given kind setting, use \"-k string\" or \"--kind=string\" when invoking from the command line. In contrast with the \",kind\" command, the \"-k\" and \"--kind\" arguments only accept a single type argument, however any number of \"-k\" and \"--kind\" arguments may be used. For command-line arguments with shell globbing characters such as \"*\" to pass through from the shell to the script as expected, double-escaping in one of the following forms might be required:\n\
+\t-k '\"*example\"'\n\
+\t-k \\\"*example\\\"\n\
+Kind types entered with \",kind\" or \",k\" do not require escaping.\n\
+\n\
+\",openWith\" or \",open\" or \",o\" will prompt to change \$openWithCommand. \",openWith command\" (or an abbreviated version of the same) will set \$openWithCommand to \"command\" without an interactive prompt. The new \$openWithCommand then becomes the default opening command, which can be changed as usual by semicolon-index commands or further \",openWith\" commands. This only affects the current session. To make changes permanent, edit the first instance of \"openWithCommand=\" in the script or configuration file. To start a session with a given setting, use \"-o command\" or \"--open-with=command\" when invoking from the command line.\n\
+\n\
+\",target\" or \",t\" will prompt to change the folder that is searched. \",target folder\" or \",t folder\" will change the folder to \"folder\" without an interactive prompt. The file database will then be refreshed and the current query applied to the new folder. To change the default folder, edit the first instance of \"target[0]=\" in the script or configuration file. To start a session with a given setting, use \"-t command\" or \"--target=command\" when invoking from the command line. 
+\n\
+\",update\" or \",u\" refreshes the file database. This allows the results to reflect any changes that have occurred since the last time the script started.\n\
+\n\
+\",q\" quits."
+
+## Warning messages
+warningUnrecognizedDotValue="Unrecognized dot-index value. Perhaps use \"..word\" to search for \".word\", use \";;word\" to search for \";word\", or use \",update\" (or just \",u\") to refresh search results."
+
+if [ ${#indexExtras[@]} -gt 1 ]; then
+    duplicateIndexChars="Duplicate characters were "
+else
+    duplicateIndexChars="A duplicate character was "
+fi
+duplicateIndexChars+="removed from \$indexCharacters: ${indexExtras[@]}."
+duplicateIndexChars+=" Index order may have changed."
+}
+
+### Set up operations
+
+## Load external configuration file
+
+# Defaults go above this block
+getOptions()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeGetOptionsBegan=$EPOCHREALTIME
+    fi
+
+if [ -r ${fileUserPath}/config ]; then
+    source ${fileUserPath}/config
+fi
+
+args=`getopt aA:cCd:fFhHi:k:lLmMo:pPrRsSt:u:wWx:zZ0 $*`
+set -- $args
+
+# TODO: rebuild with getopts builtin
+# Note that getopt can't handle multi-character arguments,
+# but they're included here as shorthand notes about what a function does
+# and this might make it easier to use a different option parser in the future.
+for i; do
+    case $i in
+
+	--)
+	    shift; break;;
+
+	# getopt case: a to h
+	-a|--no-alias-file)
+	    useBashrc=no
+	    useBashAliases=no
+	    shift;;
+
+	-A|--alias-file=)
+	source "$2"
+	shift 2;;
+
+	-c|--case-sensitive)
+	    setCaseInsensitive=no
+	    shift;;
+
+	-C|--case-insensitive)
+	    setCaseInsensitive=yes
+	    shift;;
+
+	-d|--maxdepth=)
+	findDepth=$2
+	shift 2;;
+
+	-f|--no-filters)
+	    # TODO Disable autocensor, brightlist, and site filters
+	    shift;;
+
+	-F|--all-filters)
+	    # TODO Enable autocensor, brightlist, and site filters
+	    shift;;
+
+	-h|--no-history-recording)
+	    enableHistory=no
+	    shift;;
+
+	-H|--history-recording)
+	    enableHistory=yes
+	    shift;;
+
+	# getopt case: i to p
+
+	-i|--index-characters=)
+	    setIndexCharacters "$2"
+	    shift 2;;
+
+	-k|--kind=)
+	# set kind for search engine or name for find
+	# for multiple kinds, use multiple arguments
+
+	# Avoid pathname expansion here
+	for ((count=1; count <= ${#-}; count++)); do
+	    if [ "${-:${count}:1}" = "f" ]; then
+		shellSetNoglob="on"
+		break
+	    fi
+	done
+
+	if [ -z "$shellSetNoglob" ]; then
+	    set -o noglob
+	fi
+
+	findInclude+=("$2")
+
+	if [ -z "$shellSetNoglob" ]; then
+	    set +o noglob
+	fi
+	unset shellSetNoglob
+
+	shift 2;;
+
+	-l|--no-autocensor)
+	    # Disable autocensor
+	    shift;;
+	-L|--autocensor)
+	    # Enable autocensor
+	    shift;;
+
+	-m|--no-terminal-formatting)
+	    # Disable colors and formatting
+	    shift;;
+
+	-M|--terminal-formatting)
+	    # Enable colors and formatting, if supported by the terminal
+	    shift;;
+
+	-o|--open-with=)
+	openWithCommand="$2"
+	shift 2;;
+
+	-p|--portable-mode)
+	    # Set portable mode (no file writing, no history taking)
+	    shift;;
+
+	-P|--home-mode)
+	    # Set local mode: write files, including history
+	    shift;;
+
+	# getopt case: r to z
+
+	-r|--no-brightlist)
+	    # Disable brightlist
+	    shift;;
+
+	-R|--brightlist)
+	    # Enable brightlist
+	    shift;;
+
+	-s|--no-site-filters)
+	    # Disable site-specific filters
+	    shift;;
+
+	-S|--site-filters)
+	    # Enable site-specific filters
+	    shift;;
+
+	-t|--target=)
+	target="$2"
+	if [ "$target" = "." ]; then
+	    target="$(pwd)"
+	fi
+	shift 2;;
+
+	-u|--config-file=)
+	source "$2"
+	shift 2;;
+
+	-w|--no-permanent-database)
+	    # Disable file writing
+	    shift;;
+
+	-W|--cache-database)
+	    # Enable file writing
+	    shift;;
+
+	-x|--context=)
+	# Set context flags
+	shift 2;;
+
+	-z|--quit-after-launch)
+	    stayOpenInBackground=no
+	    shift;;
+
+	-Z|--sleep-after-launch)
+	    stayOpenInBackground=yes
+	    shift;;
+
+	-0)
+	    flagPrintNullDelimiter=yes
+	    shift;;
+
+    esac
+done
+
+# Default query: all remaining parameters
+query=($@)
+
+# profiling
+if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+    timeGetOptionsDone=$EPOCHREALTIME
+    bcString="($timeGetOptionsDone - $timeGetOptionsBegan)"
+    bcString+=" * 1000/1; scale=0"
+    message="getOptions() "
+    message+=$(echo "$bcString" | bc)
+    message+="ms"
+    timeFinish=$EPOCHREALTIME
+    profileMsg "$message"
+fi
+}
+
+parseOptions()
+{
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = "on" ]; then
+	timeParseOptionsBegan=$EPOCHREALTIME
+    fi
+
+    # Source aliases
+    # Source ~/.bashrc and ~/.bash_aliases if config asks for it.
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeSourcingBegan=$EPOCHREALTIME
+    fi
+
+    if [ ! -z $useBashrc ] && [ "$useBashrc" = "yes" ] && [ -r ~/.bashrc ]; then
+	source ~/.bashrc
+    fi
+
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeSourcingBashRCDone=$EPOCHREALTIME
+    fi
+
+    if [ ! -z $useBashAliases ] \
+	   && [ "$useBashAliases" = "yes" ] \
+	   && [ -r ~/.bash_aliases ]
+    then
+	shopt -s expand_aliases
+	source ~/.bash_aliases
+    fi
+
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeSourcingAliasesDone=$EPOCHREALTIME
+    fi
+
+    # Handle $setCaseInsensitive
+
+    if [ ! -z $setCaseInsensitive ] && [ "$setCaseInsensitive" = "yes" ]; then
+	findName="iname"
+	grepIgnoreCase="--ignore-case"
+    else
+	findName="name"
+	grepIgnoreCase=""
+    fi
+
+    # profiling
+    if [ ! -z $profiling ] && [ "$profiling" = on ]; then
+	timeParseOptionsDone=$EPOCHREALTIME
+	bcString="($timeParseOptionsDone - $timeParseOptionsBegan)"
+	bcString+=" * 1000/1; scale=0"
+	message="parseOptions() "
+	message+=$(echo "$bcString" | bc)
+	message+="ms"
+	timeFinish=$EPOCHREALTIME
+	profileMsg "$message"
+    fi
+}
+
+## Handle dependencies
+usesW3m()
+{
+    if [ -z "$(which w3m)" ]; then
+	echo -n "w3m is required." >&2
+
+	case "$nameSystem" in
+	    Darwin*)
+		echo -n " Perhaps try \"brew install w3m\"?" >&2
+		;;
+	    *Debian*)
+		echo -n " Perhaps try \"apt install w3m\"?" >&2
+		;;
+	esac
+
+	echo "" >&2
+	exit 1
+    fi
+}
+
+usesCurl()
+{
+    if [ -z "$(which curl)" ]; then
+	echo -n "curl is required." >&2
+
+	case "$nameSystem" in
+	    *Debian*)
+		echo -n " Perhaps try \"apt install curl\"?" >&2
+		;;
+	esac
+
+	echo "" >&2
+	exit 1
+    fi
+
+    if [ "${curlCommand:0:8}" = "torsocks" ]; then
+	if [ -z "$(which torsocks)" ]; then
+	    echo "The config has been customized so that \$curlCommand will use torsocks, but torsocks was not found." | fold -s >&2
+	    exit 1
+	fi
+    fi
+}
+
+# Set up history file variables
+
+# If history is never enabled, these will be dead, but create them now to allow
+# history to be turned on interactively.
+if [ -z $enableHistory ]; then
+    enableHistoryDefault=notSet
+elif [ "$enableHistory" = "yes" ]; then
+    enableHistoryDefault=yes
+else
+    enableHistoryDefault=no
+fi
+
+if [ -z "$historyFile" ]; then
+    historyFile=${fileUserPath}/searchHistory
+fi
+
+### Operations
+
+# Kludge. I haven't studied the differences between signals; the most
+# intentional use herein is "2" to trap "Control-C".
+trap cleanExit 0 1 2 3 4 5 6 7 8 9
+
+# If LANG is set to a UTF value, multiple utilities report:
+# "Illegal byte sequence" --
+# So set LANG=C to treat each char as a byte value rather than a UTF char
+LANG=C
+
+getOptions $@
+buildDocStrings
+parseOptions
+firstRun=yes
+
+## Define and handle $target[n] options
+if [ -z "${target}" ]; then
+    target="$(pwd)"
+fi
+parseTargetArgument
+
+main
+cleanExit
+
+### Developer Notes
+# This text is out of date.
+
+## Logical outline
+# I've tried to keep the script's operations to the following flow:
+
+#(This is an ideal. The program doesn't follow this, but it might trend in
+# that direction as I continue to develop it.                                )
+
+# 1 Get target.
+# a	If search:
+# b	    Get query.
+# c	    Format the query into a form appropriate for target.
+# d	    Submit query to the target.
+# e	    Obtain interim results.
+# f	Else, target identifies desired content.
+# g	    If unwritable, maybe obtain writable copy.
+# 2 Maybe parse results for internal processing.
+# 3 Maybe save results to cache.
+# 4 Maybe filter results.
+# 5 Depending on target type and user flags:
+# a	Confirm completion of command and go to 7,
+# b	Present results internally and go to 1,
+# c	Send results to external command, or
+# d	Send target to external command.
+# 6 If set to continue, and if previous results exist,
+# a	revert to previous target and query and go to 1.
+# 7 Clean up and exit.
+
+# 1. Get target.
+# There are four ways to define a parameter for Re-Target:
+#   -Defined as default in script
+#   -Defined as default in a sourced config file
+#   -Defined upon invocation on the command line
+#   -Defined interactively as a dot-, semicolon- or comma-command
+#
+#(If the phrase "comma-command" doesn't make your head want to dance a little
+# jig, then I can only offer fair warning that this doc might include noxious
+# wordplay and punnery. If you did wiggle a jiggle, I hope my entertainment
+# will continue to be yours sometimes, too.                                   )
+
+# 1a. If search.
+# This is handled by parseTargetArgument(), which is why that function can be
+# called before main(). parseTargetArgument()
+
+## $query and $parameters[]
+#  Each $query[] element contains a search string. The array is kept in
+#  historical order.
+#  In contrast, $parameters[] is reset for each search based on a given
+#  $query[] element. This allows each query word to be a separate element
+#  while performing the search in updateResults(), essentially creating a
+#  two-dimensional array extending on the y axis below $query[] on the x axis.
