@@ -2710,7 +2710,7 @@ cacheAndFilterHTML()
 				 \! \( -name "*~" \
 				 -or -name "autocensor" \
 				 -or -name "brightlist" \) | \
-				xargs basename))
+				xargs -n 1 basename))
 
 	# For each filter...
 	for ((count=0; count < ${#listOfURIFilters[@]}; count++)); do
